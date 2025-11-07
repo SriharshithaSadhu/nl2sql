@@ -18,14 +18,16 @@ st.set_page_config(
 
 @st.cache_resource
 def load_nl2sql_model(model_name: str = "cssupport/t5-small-awesome-text-to-sql"):
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+    hf_token = os.environ.get('HUGGING_FACE_TOKEN', None)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_name, token=hf_token)
     return tokenizer, model
 
 @st.cache_resource
 def load_summarization_model(model_name: str = "t5-small"):
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+    hf_token = os.environ.get('HUGGING_FACE_TOKEN', None)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_name, token=hf_token)
     return tokenizer, model
 
 def extract_schema(db_path: str) -> Dict[str, List[str]]:
@@ -46,10 +48,12 @@ def extract_schema(db_path: str) -> Dict[str, List[str]]:
     return schema
 
 def format_schema_for_model(schema: Dict[str, List[str]]) -> str:
-    schema_str = ""
+    schema_lines = []
     for table_name, columns in schema.items():
-        schema_str += f"{table_name}({', '.join(columns)})\n"
-    return schema_str.strip()
+        column_list = ', '.join(columns)
+        schema_lines.append(f"Table {table_name} has columns: {column_list}")
+    schema_str = '\n'.join(schema_lines)
+    return schema_str
 
 def generate_sql(question: str, schema_str: str, tokenizer, model) -> str:
     prompt = f"Schema: {schema_str}\nQuestion: {question}\nSQL:"
@@ -182,6 +186,10 @@ def main():
                 df = pd.read_csv(uploaded_file)
                 
                 db_path = os.path.join(temp_dir, "uploaded_db.sqlite")
+                
+                if os.path.exists(db_path):
+                    os.remove(db_path)
+                
                 conn = sqlite3.connect(db_path)
                 
                 table_name = uploaded_file.name.replace('.csv', '').replace(' ', '_').replace('-', '_')
@@ -269,6 +277,13 @@ def main():
             
             if error:
                 st.error(error)
+                st.session_state.query_history.append({
+                    'question': question,
+                    'sql': sql,
+                    'rows': 0,
+                    'success': False,
+                    'error': error
+                })
             elif df is not None:
                 st.success(f"✅ Query executed successfully! Found {len(df)} rows.")
                 
@@ -290,14 +305,6 @@ def main():
                     'sql': sql,
                     'rows': len(df),
                     'success': True
-                })
-            else:
-                st.session_state.query_history.append({
-                    'question': question,
-                    'sql': sql,
-                    'rows': 0,
-                    'success': False,
-                    'error': error
                 })
     
     with tab2:
