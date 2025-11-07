@@ -71,6 +71,26 @@ def generate_sql(question: str, schema_str: str, tokenizer, model) -> str:
     sql = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return sql
 
+def sanitize_error_message(error_msg: str) -> str:
+    """Remove SQL query content from error messages to keep queries hidden from users."""
+    error_str = str(error_msg)
+    
+    if "near" in error_str.lower():
+        parts = error_str.split("near")
+        if len(parts) > 1:
+            return f"Query syntax error near {parts[-1].strip()}"
+    
+    if "no such table" in error_str.lower():
+        return "Database table not found. Please check your data structure."
+    
+    if "no such column" in error_str.lower():
+        return "Column not found in the database. Please rephrase your question."
+    
+    if "ambiguous column" in error_str.lower():
+        return "Ambiguous column reference. Please be more specific in your question."
+    
+    return "Unable to process your question. Please try rephrasing or asking something simpler."
+
 def execute_sql(sql: str, db_path: str) -> Tuple[pd.DataFrame, Optional[str]]:
     sql_clean = sql.strip().upper()
     
@@ -90,7 +110,8 @@ def execute_sql(sql: str, db_path: str) -> Tuple[pd.DataFrame, Optional[str]]:
         conn.close()
         return df, None
     except Exception as e:
-        return None, f"SQL Execution Error: {str(e)}"
+        sanitized_error = sanitize_error_message(str(e))
+        return None, sanitized_error
 
 def generate_summary(df: pd.DataFrame, question: str, tokenizer, model) -> str:
     if df.empty:
@@ -269,9 +290,6 @@ def main():
             with st.spinner("🧠 Generating SQL query..."):
                 sql = generate_sql(question, schema_str, nl2sql_tokenizer, nl2sql_model)
             
-            st.subheader("Generated SQL Query")
-            st.code(sql, language="sql")
-            
             with st.spinner("⚙️ Executing query..."):
                 df, error = execute_sql(sql, st.session_state.db_path)
             
@@ -316,7 +334,6 @@ def main():
             for idx, query in enumerate(reversed(st.session_state.query_history)):
                 with st.expander(f"Query #{len(st.session_state.query_history) - idx}: {query['question']}", expanded=False):
                     st.markdown(f"**Question:** {query['question']}")
-                    st.code(query['sql'], language="sql")
                     
                     if query['success']:
                         st.success(f"✅ Success - {query['rows']} rows returned")

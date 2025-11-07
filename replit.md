@@ -1,6 +1,8 @@
 # Overview
 
-AskDB is an AI-powered natural language to SQL query system that converts user questions into SQL queries using Hugging Face Transformers (specifically T5 models). The application provides an interactive web interface built with Streamlit, allowing users to upload databases (CSV or SQLite), ask questions in plain English, and receive SQL queries, execution results, visualizations, and natural language summaries.
+AskDB is an AI-powered natural language to SQL query system that converts user questions into SQL queries using Hugging Face Transformers (specifically T5 models). The application provides an interactive web interface built with Streamlit, allowing users to upload databases (CSV or SQLite), ask questions in plain English, and receive execution results, visualizations, and natural language summaries.
+
+**Key Design Principle**: The generated SQL queries are NEVER shown to users. Only results are displayed, making the system perfect for non-technical users who want insights from their data without needing to know SQL.
 
 The system focuses on safe, read-only database operations and provides an intuitive interface for non-technical users to explore data through natural language.
 

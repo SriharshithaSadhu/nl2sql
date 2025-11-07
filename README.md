@@ -5,12 +5,13 @@ An AI-powered application that converts natural language questions into SQL quer
 ## ✨ Features
 
 - **🤖 AI-Powered SQL Generation**: Convert natural language questions to SQL using pre-trained T5 models
+- **🎯 User-Friendly Interface**: See only results, not complex SQL code - perfect for non-technical users
 - **📁 Flexible Database Support**: Upload CSV files or SQLite databases
 - **🔍 Automatic Schema Extraction**: Intelligently extracts and displays database structure
 - **🔒 Safe Query Execution**: Only read-only queries (SELECT, WITH/CTE) allowed for data protection
 - **📊 Interactive Visualizations**: Automatic chart generation for numeric data using Plotly
 - **💡 Natural Language Summaries**: AI-generated plain English explanations of query results
-- **📜 Query History**: Track all your questions and generated SQL queries
+- **📜 Query History**: Track all your questions and results
 - **⚡ Optimized Performance**: Model caching for faster inference
 
 ## 🚀 Getting Started
@@ -55,13 +56,13 @@ streamlit run app.py --server.port 5000
      - "Count records grouped by grade"
 
 4. **Review Results**
-   - Generated SQL query
-   - Query results in a table
+   - Query results displayed in an easy-to-read table
    - Interactive visualizations (for numeric data)
-   - Natural language summary
+   - Natural language summary explaining what the data shows
+   - User-friendly error messages if something goes wrong
 
 5. **Check History**
-   - View all previous queries in the "Query History" tab
+   - View all previous questions and their results in the "Query History" tab
 
 ## 🔧 Technical Details
 
@@ -80,9 +81,10 @@ streamlit run app.py --server.port 5000
 
 ### Safety Features
 
+- **SQL Privacy**: Generated SQL queries are never shown to users - only results are displayed
 - **Query Validation**: Blocks all mutation operations (INSERT, UPDATE, DELETE, DROP, etc.)
 - **Read-Only Access**: Only SELECT and WITH (CTE) queries permitted
-- **Error Handling**: Clear error messages for invalid queries or execution failures
+- **User-Friendly Errors**: Error messages are sanitized to remove technical SQL content
 - **SQL Injection Protection**: Queries are validated before execution
 
 ### Performance Optimizations
