@@ -70,8 +70,15 @@ def generate_sql(question: str, schema_str: str, tokenizer, model) -> str:
 def execute_sql(sql: str, db_path: str) -> Tuple[pd.DataFrame, Optional[str]]:
     sql_clean = sql.strip().upper()
     
-    if not sql_clean.startswith("SELECT"):
-        return None, "Error: Only SELECT queries are allowed for safety reasons."
+    dangerous_keywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 
+                          'TRUNCATE', 'REPLACE', 'PRAGMA', 'ATTACH', 'DETACH']
+    
+    for keyword in dangerous_keywords:
+        if keyword in sql_clean:
+            return None, f"Error: {keyword} statements are not allowed for safety reasons. Only read-only queries (SELECT, WITH) are permitted."
+    
+    if not (sql_clean.startswith("SELECT") or sql_clean.startswith("WITH")):
+        return None, "Error: Only SELECT and WITH (CTE) queries are allowed for safety reasons."
     
     try:
         conn = sqlite3.connect(db_path)
