@@ -60,11 +60,12 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
     q_lower = question.lower()
     
     # FILTER queries with WHERE conditions (greater than, less than, equals)
+    import re
+    
     for col in columns:
         if col in q_lower:
             # Greater than queries
             if any(word in q_lower for word in ['greater than', 'more than', 'above', '>']):
-                import re
                 # Try to extract the number
                 number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
                 if number_match:
@@ -73,7 +74,6 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
             
             # Less than queries
             if any(word in q_lower for word in ['less than', 'below', 'under', '<']):
-                import re
                 number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
                 if number_match:
                     value = number_match.group(1)
@@ -81,7 +81,6 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
             
             # Equals queries
             if any(word in q_lower for word in ['equals', 'equal to', '=', 'is ']):
-                import re
                 # Try number first
                 number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
                 if number_match:
@@ -92,6 +91,31 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
                 if text_match:
                     value = text_match.group(1)
                     return f"SELECT * FROM {table_name} WHERE {col} = '{value}'"
+    
+    # Text filter: "show all X students" or "show X records"
+    # Pattern: "show/display/list all [VALUE] [COLUMN]" or "show [VALUE] [COLUMN]"
+    for col in columns:
+        col_lower = col.lower()
+        # Look for pattern like "Science students" where students/records refers to rows
+        # and Science is the value
+        if col_lower in q_lower:
+            # Find potential filter values (capitalized words that aren't SQL keywords)
+            words = question.split()
+            for i, word in enumerate(words):
+                # Skip common query words
+                if word.lower() in ['show', 'all', 'the', 'list', 'display', 'get', 'find', 'select']:
+                    continue
+                # Check if this word appears before the column name in the question
+                if word.lower() not in ['students', 'records', 'rows', 'entries', 'data'] and \
+                   word.lower() != col_lower and \
+                   len(word) > 2:
+                    # This might be a filter value
+                    # Check if it appears before mentions of the column
+                    word_pos = q_lower.find(word.lower())
+                    col_pos = q_lower.find(col_lower)
+                    if word_pos < col_pos and word_pos != -1:
+                        # Use LIKE for case-insensitive partial matching
+                        return f"SELECT * FROM {table_name} WHERE {col} LIKE '%{word}%'"
     
     # SHOW ALL queries (no filters)
     if any(word in q_lower for word in ['all', 'everything', 'show', 'list', 'display']) and \
@@ -108,6 +132,36 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
     
     # AVERAGE queries
     if 'average' in q_lower or 'avg' in q_lower:
+        # Check for "average X by Y" pattern (with GROUP BY)
+        if ' by ' in q_lower:
+            # Find what to average and what to group by
+            avg_col = None
+            group_col = None
+            
+            # Common aggregation columns
+            agg_keywords = ['score', 'price', 'amount', 'value', 'salary', 'revenue', 'sales']
+            for keyword in agg_keywords:
+                if keyword in q_lower:
+                    for col in columns:
+                        if keyword in col.lower():
+                            avg_col = col
+                            break
+                    if avg_col:
+                        break
+            
+            # Find group by column (after "by")
+            by_index = q_lower.find(' by ')
+            if by_index != -1:
+                after_by = q_lower[by_index + 4:].strip()
+                for col in columns:
+                    if col.lower() in after_by:
+                        group_col = col
+                        break
+            
+            if avg_col and group_col:
+                return f"SELECT {group_col}, AVG({avg_col}) as average_{avg_col} FROM {table_name} GROUP BY {group_col}"
+        
+        # Simple average (no GROUP BY)
         for col in columns:
             if col in q_lower:
                 return f"SELECT AVG({col}) as average_{col} FROM {table_name}"
@@ -292,8 +346,8 @@ def main():
         
         uploaded_file = st.file_uploader(
             "Upload your database",
-            type=['csv', 'db', 'sqlite', 'sqlite3'],
-            help="Upload a CSV file or SQLite database"
+            type=['csv', 'xls', 'xlsx', 'db', 'sqlite', 'sqlite3'],
+            help="Upload a CSV, Excel (XLS/XLSX), or SQLite database"
         )
         
         if uploaded_file:
@@ -301,10 +355,16 @@ def main():
             
             temp_dir = tempfile.gettempdir()
             
-            if file_ext == 'csv':
-                st.info("Converting CSV to SQLite database...")
-                
-                df = pd.read_csv(uploaded_file)
+            if file_ext in ['csv', 'xls', 'xlsx']:
+                # Convert CSV or Excel to SQLite
+                if file_ext == 'csv':
+                    st.info("Converting CSV to SQLite database...")
+                    df = pd.read_csv(uploaded_file)
+                    file_type = "CSV"
+                elif file_ext in ['xls', 'xlsx']:
+                    st.info("Converting Excel to SQLite database...")
+                    df = pd.read_excel(uploaded_file, engine='openpyxl' if file_ext == 'xlsx' else 'xlrd')
+                    file_type = "Excel"
                 
                 db_path = os.path.join(temp_dir, "uploaded_db.sqlite")
                 
@@ -313,13 +373,15 @@ def main():
                 
                 conn = sqlite3.connect(db_path)
                 
-                table_name = uploaded_file.name.replace('.csv', '').replace(' ', '_').replace('-', '_')
+                # Clean table name
+                table_name = uploaded_file.name.rsplit('.', 1)[0]  # Remove extension
+                table_name = table_name.replace(' ', '_').replace('-', '_').replace('.', '_')
                 df.to_sql(table_name, conn, if_exists='replace', index=False)
                 conn.close()
                 
                 st.session_state.db_path = db_path
                 st.session_state.schema = extract_schema(db_path)
-                st.success(f"✅ CSV converted to database with table: `{table_name}`")
+                st.success(f"✅ {file_type} converted to database with table: `{table_name}`")
             
             else:
                 db_path = os.path.join(temp_dir, uploaded_file.name)

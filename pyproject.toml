@@ -4,12 +4,14 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
+    "openpyxl>=3.1.5",
     "pandas>=2.3.3",
     "plotly>=6.4.0",
     "sentencepiece>=0.2.1",
     "streamlit>=1.51.0",
     "torch>=2.9.0",
     "transformers>=4.57.1",
+    "xlrd>=2.0.2",
 ]
 
 [[tool.uv.index]]

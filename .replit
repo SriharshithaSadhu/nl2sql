@@ -2,7 +2,7 @@ modules = ["python-3.11"]
 
 [nix]
 channel = "stable-25_05"
-packages = ["glibcLocales"]
+packages = ["glibcLocales", "pkg-config"]
 
 [deployment]
 deploymentTarget = "autoscale"
@@ -35,6 +35,10 @@ outputType = "webview"
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[[ports]]
+localPort = 33751
+externalPort = 3002
 
 [[ports]]
 localPort = 36767
