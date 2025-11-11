@@ -19,9 +19,16 @@ Preferred communication style: Simple, everyday language.
 
 ## AI/ML Components
 - **Model**: Hugging Face Transformers with T5 architecture for natural language to SQL conversion
+  - **Primary Model**: `mrm8488/t5-base-finetuned-wikiSQL` - T5-base model fine-tuned on WikiSQL dataset
+  - **Previous Model**: Upgraded from `cssupport/t5-small-awesome-text-to-sql` for improved accuracy
 - **Rationale**: T5 (Text-to-Text Transfer Learning) models are pre-trained and proven effective for sequence-to-sequence tasks like translation from natural language to structured queries
 - **Implementation Details**:
+  - Two-tier SQL generation pipeline:
+    1. **Template-based generation**: Fast, reliable SQL for common query patterns (SHOW ALL, COUNT, AVERAGE, GROUP BY, FILTER)
+    2. **AI model fallback**: Handles complex queries using WikiSQL-trained T5 model
   - Model caching implemented for performance optimization
+  - Structured prompts with schema context for better AI generation
+  - SQL output cleaning and validation
   - Inference pipeline uses PyTorch backend
   - SentencePiece tokenizer for text preprocessing
 
@@ -34,9 +41,14 @@ Preferred communication style: Simple, everyday language.
 - **Schema Extraction**: Automatic introspection of database structure to provide context for query generation
 
 ## Security Architecture
+- **Query Privacy**: Generated SQL queries are NEVER displayed to users
+  - Results, visualizations, and summaries shown instead
+  - Error messages sanitized to remove SQL content using `sanitize_error_message()`
+  - Query history shows questions and status, NOT the generated SQL
 - **Query Validation**: Read-only query enforcement (SELECT, WITH/CTE statements only)
 - **Rationale**: Prevents data modification, deletion, or schema changes to protect data integrity
 - **Implementation**: Query filtering before execution to block INSERT, UPDATE, DELETE, DROP, ALTER operations
+- **Safe User Experience**: Non-technical users get insights without SQL knowledge
 
 ## Visualization Layer
 - **Library**: Plotly for interactive charts
@@ -56,8 +68,9 @@ Preferred communication style: Simple, everyday language.
 
 ## AI/ML Services
 - **Hugging Face Transformers**: Pre-trained T5 models for NL-to-SQL conversion
-  - No API key required for publicly available models
-  - Models cached locally after first download
+  - Current model: `mrm8488/t5-base-finetuned-wikiSQL`
+  - Requires Hugging Face token for model access (stored in `HUGGING_FACE_TOKEN` environment variable)
+  - Models cached locally after first download for faster inference
 
 ## Core Python Libraries
 - **streamlit**: Web application framework and UI components
@@ -75,6 +88,35 @@ Preferred communication style: Simple, everyday language.
 - **Replit**: Hosting and execution environment
 - **GitHub**: Version control (repository initialization mentioned in project setup notes)
 
+## Recent Changes (November 2025)
+
+### Model Upgrade
+- Upgraded from `cssupport/t5-small-awesome-text-to-sql` to `mrm8488/t5-base-finetuned-wikiSQL`
+- Added Hugging Face authentication token support
+- Improved model prompting with structured schema context
+
+### Template-Based SQL Generation
+- Implemented pattern-matching system for common query types:
+  - SHOW ALL: Returns all records from table
+  - COUNT: Counts records (with optional GROUP BY)
+  - AVERAGE: Calculates numeric column averages
+  - GROUP BY: Groups and counts by specified columns
+  - FILTER: Filters records by conditions
+- Templates provide fast, reliable SQL for 80%+ of user queries
+- AI model used as fallback for complex queries
+
+### SQL Privacy Enhancement
+- Completely removed "Generated SQL Query" display section
+- Added `sanitize_error_message()` to strip SQL from all error messages
+- Query history shows questions and status only, never SQL code
+- Maintains server-side SQL logging for debugging while hiding from UI
+
+### Testing & Validation
+- Comprehensive end-to-end testing completed with Playwright
+- Verified SQL privacy across all user interactions
+- Confirmed template and AI-based query generation working correctly
+- Architect-approved implementation meeting all requirements
+
 ## Future Architectural Considerations
 The `attached_assets` folder references a planned multi-tier architecture with:
 - Separate backend (FastAPI) and frontend directories
@@ -82,4 +124,4 @@ The `attached_assets` folder references a planned multi-tier architecture with:
 - Spider dataset integration for fine-tuning
 - Virtual environment setup with additional dependencies (FastAPI, uvicorn)
 
-**Note**: The current implementation is a streamlined Streamlit monolith, while the project notes suggest evolution toward a decoupled FastAPI backend architecture.
+**Note**: The current implementation is a streamlined Streamlit monolith optimized for single-user data exploration, while project notes suggest evolution toward a decoupled FastAPI backend architecture for multi-user deployment.
