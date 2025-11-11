@@ -40,12 +40,23 @@ def extract_schema(db_path: str) -> Dict[str, List[str]]:
     schema = {}
     for table in tables:
         table_name = table[0]
-        cursor.execute(f"PRAGMA table_info({table_name})")
-        columns = cursor.fetchall()
-        schema[table_name] = [col[1] for col in columns]
+        try:
+            # Properly quote table names to handle spaces and reserved words
+            quoted_table = quote_identifier(table_name)
+            cursor.execute(f"PRAGMA table_info({quoted_table})")
+            columns = cursor.fetchall()
+            schema[table_name] = [col[1] for col in columns]
+        except Exception as e:
+            # Log error but continue with other tables
+            print(f"Warning: Could not extract schema for table '{table_name}': {str(e)}")
+            schema[table_name] = []
     
     conn.close()
     return schema
+
+def quote_identifier(name: str) -> str:
+    """Properly quote SQL identifiers to handle spaces and reserved words"""
+    return f'"{name.replace(chr(34), chr(34)+chr(34))}"'
 
 def format_schema_for_model(schema: Dict[str, List[str]]) -> str:
     schema_lines = []
@@ -59,6 +70,8 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
     """Generate SQL from templates for common query patterns"""
     q_lower = question.lower()
     import re
+    
+    quoted_table = quote_identifier(table_name)
     
     # PRIORITY 1: AGGREGATE FUNCTIONS (must come first!)
     # AVERAGE queries
@@ -104,37 +117,42 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
                         break
             
             if avg_col and group_col:
-                return f"SELECT {group_col}, AVG({avg_col}) as average_{avg_col} FROM {table_name} GROUP BY {group_col}"
+                quoted_avg = quote_identifier(avg_col)
+                quoted_group = quote_identifier(group_col)
+                return f"SELECT {quoted_group}, AVG({quoted_avg}) as average_{avg_col} FROM {quoted_table} GROUP BY {quoted_group}"
         
         # Simple average (no GROUP BY)
         for col in columns:
             if col in q_lower:
-                return f"SELECT AVG({col}) as average_{col} FROM {table_name}"
+                quoted_col = quote_identifier(col)
+                return f"SELECT AVG({quoted_col}) as average_{col} FROM {quoted_table}"
     
     # COUNT queries
     if 'count' in q_lower and not any(word in q_lower for word in ['where', 'above', 'below']):
         if 'by' in q_lower or 'group' in q_lower:
             for col in columns:
                 if col in q_lower:
-                    return f"SELECT {col}, COUNT(*) as count FROM {table_name} GROUP BY {col}"
-        return f"SELECT COUNT(*) as total FROM {table_name}"
+                    quoted_col = quote_identifier(col)
+                    return f"SELECT {quoted_col}, COUNT(*) as count FROM {quoted_table} GROUP BY {quoted_col}"
+        return f"SELECT COUNT(*) as total FROM {quoted_table}"
     
     # PRIORITY 2: FILTER queries with WHERE conditions
     for col in columns:
         if col in q_lower:
+            quoted_col = quote_identifier(col)
             # Greater than queries
             if any(word in q_lower for word in ['greater than', 'more than', 'above', '>']):
                 number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
                 if number_match:
                     value = number_match.group(1)
-                    return f"SELECT * FROM {table_name} WHERE {col} > {value}"
+                    return f"SELECT * FROM {quoted_table} WHERE {quoted_col} > {value}"
             
             # Less than queries
             if any(word in q_lower for word in ['less than', 'below', 'under', '<']):
                 number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
                 if number_match:
                     value = number_match.group(1)
-                    return f"SELECT * FROM {table_name} WHERE {col} < {value}"
+                    return f"SELECT * FROM {quoted_table} WHERE {quoted_col} < {value}"
             
             # Equals queries (explicit)
             if any(word in q_lower for word in ['equals', 'equal to', '=']):
@@ -142,12 +160,12 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
                 number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
                 if number_match:
                     value = number_match.group(1)
-                    return f"SELECT * FROM {table_name} WHERE {col} = {value}"
+                    return f"SELECT * FROM {quoted_table} WHERE {quoted_col} = {value}"
                 # Otherwise look for quoted text
                 text_match = re.search(r"['\"]([^'\"]+)['\"]", q_lower)
                 if text_match:
                     value = text_match.group(1)
-                    return f"SELECT * FROM {table_name} WHERE {col} = '{value}'"
+                    return f"SELECT * FROM {quoted_table} WHERE {quoted_col} = '{value}'"
     
     # PRIORITY 3: Text filter patterns (must check AFTER aggregates!)
     # Pattern: "show all Science students" (Science is the filter value)
@@ -166,12 +184,13 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
                         word_pos = q_lower.find(word.lower())
                         col_pos = q_lower.find(col_lower)
                         if word_pos < col_pos and word_pos != -1:
-                            return f"SELECT * FROM {table_name} WHERE {col} LIKE '%{word}%'"
+                            quoted_col = quote_identifier(col)
+                            return f"SELECT * FROM {quoted_table} WHERE {quoted_col} LIKE '%{word}%'"
     
     # PRIORITY 4: SHOW ALL queries (default)
     if any(word in q_lower for word in ['all', 'everything', 'show', 'list', 'display']) and \
        not any(word in q_lower for word in ['where', 'above', 'below', 'greater', 'less', 'average', 'count']):
-        return f"SELECT * FROM {table_name}"
+        return f"SELECT * FROM {quoted_table}"
     
     return None
 
@@ -199,11 +218,15 @@ def generate_sql(question: str, schema_str: str, tokenizer, model) -> str:
     if template_sql:
         return template_sql
     
+    # AI fallback - properly quote identifiers
+    quoted_table = quote_identifier(table_name)
+    
     column_types = []
     for col in columns:
-        column_types.append(f"{col} text")
+        quoted_col = quote_identifier(col)
+        column_types.append(f"{quoted_col} text")
     
-    schema_formatted = f"CREATE TABLE {table_name} ({', '.join(column_types)})"
+    schema_formatted = f"CREATE TABLE {quoted_table} ({', '.join(column_types)})"
     
     prompt = f"translate English to SQL: {question} {schema_formatted}"
     
@@ -224,11 +247,12 @@ def generate_sql(question: str, schema_str: str, tokenizer, model) -> str:
     if '|' in sql or 'table:' in sql or 'CREATE' in sql:
         sql = sql.split('|')[0].split('CREATE')[0].split('table:')[0].strip()
     
-    sql = sql.replace('FROM table ', f'FROM {table_name} ')
-    sql = sql.replace('FROM Table ', f'FROM {table_name} ')
+    # Use quoted table name in post-processing
+    sql = sql.replace('FROM table ', f'FROM {quoted_table} ')
+    sql = sql.replace('FROM Table ', f'FROM {quoted_table} ')
     
     if not sql.upper().startswith('SELECT') and not sql.upper().startswith('WITH'):
-        sql = f"SELECT * FROM {table_name}"
+        sql = f"SELECT * FROM {quoted_table}"
     
     return sql
 
@@ -416,11 +440,34 @@ def main():
                 st.session_state.db_path = db_path
                 st.session_state.schema = extract_schema(db_path)
                 
-                # Add to upload history
+                # Add to upload history with complete metadata
                 import datetime
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                
+                # Calculate total rows across all tables with proper quoting
+                total_rows = 0
+                all_columns = []
+                for table_name in st.session_state.schema.keys():
+                    try:
+                        # Properly quote table names to handle spaces and reserved words
+                        quoted_table = quote_identifier(table_name)
+                        cursor.execute(f"SELECT COUNT(*) FROM {quoted_table}")
+                        table_rows = cursor.fetchone()[0]
+                        total_rows += table_rows
+                        all_columns.extend(st.session_state.schema[table_name])
+                    except Exception as e:
+                        # Log error but continue with other tables
+                        st.warning(f"Could not count rows in table '{table_name}': {str(e)}")
+                        all_columns.extend(st.session_state.schema[table_name])
+                
+                conn.close()
+                
                 upload_entry = {
                     'filename': uploaded_file.name,
                     'type': 'SQLite',
+                    'rows': total_rows,
+                    'columns': all_columns,
                     'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
                 st.session_state.upload_history.append(upload_entry)
@@ -476,7 +523,10 @@ def main():
         """)
         return
     
-    st.success(f"🗄️ Database loaded with {len(st.session_state.schema)} table(s)")
+    if st.session_state.schema:
+        st.success(f"🗄️ Database loaded with {len(st.session_state.schema)} table(s)")
+    else:
+        st.error("Database uploaded but schema could not be extracted")
     
     tab1, tab2, tab3 = st.tabs(["💬 Ask a Question", "💭 Chat History", "📜 Query History"])
     

@@ -105,6 +105,33 @@ Preferred communication style: Simple, everyday language.
 - Templates provide fast, reliable SQL for 80%+ of user queries
 - AI model used as fallback for complex queries
 
+### Enhanced for Diverse Databases (November 11, 2025)
+- **Expanded aggregation keywords** to support diverse business databases:
+  - Added: price, cost, total, quantity, revenue, sales, profit, discount, tax, fee, charge, payment, balance, rate
+  - Supports orders, customers, products, and any business domain databases
+- **Upload History Tracking**:
+  - Tracks all uploaded files with metadata (filename, type, rows, columns, timestamp)
+  - Displays last 5 uploads in sidebar
+  - Complete metadata for CSV, Excel, and SQLite files
+- **Full Chat History**:
+  - Three-tab interface: Ask Question, Chat History, Query History
+  - Chat history shows complete conversation flow with timestamps
+  - Displays questions, answers, row counts, and result previews
+  - Preserves all interactions in session
+
+### SQL Identifier Quoting (November 11, 2025)
+- **Comprehensive quoting system** for table and column names:
+  - Shared `quote_identifier()` function ensures consistent quoting
+  - Handles tables/columns with spaces (e.g., "Order Details")
+  - Escapes reserved SQL keywords
+  - Properly escapes embedded quotes by doubling
+- **Applied across all SQL generation**:
+  - Template-based queries quote all identifiers
+  - AI fallback quotes identifiers in prompts and post-processing
+  - Schema extraction uses quoted table names
+  - Upload metadata collection uses quoted table names
+- **Error handling**: Try/except per table prevents cascading failures
+
 ### SQL Privacy Enhancement
 - Completely removed "Generated SQL Query" display section
 - Added `sanitize_error_message()` to strip SQL from all error messages
@@ -115,6 +142,8 @@ Preferred communication style: Simple, everyday language.
 - Comprehensive end-to-end testing completed with Playwright
 - Verified SQL privacy across all user interactions
 - Confirmed template and AI-based query generation working correctly
+- Tested with diverse databases (orders, customers, products)
+- Verified upload history and chat history features
 - Architect-approved implementation meeting all requirements
 
 ## Future Architectural Considerations
