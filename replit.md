@@ -95,15 +95,28 @@ Preferred communication style: Simple, everyday language.
 - Added Hugging Face authentication token support
 - Improved model prompting with structured schema context
 
-### Template-Based SQL Generation
-- Implemented pattern-matching system for common query types:
-  - SHOW ALL: Returns all records from table
-  - COUNT: Counts records (with optional GROUP BY)
-  - AVERAGE: Calculates numeric column averages
-  - GROUP BY: Groups and counts by specified columns
-  - FILTER: Filters records by conditions
-- Templates provide fast, reliable SQL for 80%+ of user queries
-- AI model used as fallback for complex queries
+### AI-First Dynamic SQL Generation (November 11, 2025)
+- **Primary Strategy**: Enhanced AI model with few-shot prompting
+  - T5 model (WikiSQL fine-tuned) as main query generator
+  - Templates retained as fast-path optimization only
+  - Handles ANY query type dynamically like an "SQL master"
+- **Enhanced Schema Extraction**:
+  - Extracts column types and sample values
+  - Provides rich context to AI model
+  - Helps model understand data patterns
+- **Few-Shot Prompting**:
+  - Structured prompts with examples
+  - Table and column details with types
+  - Better generation parameters (temperature, top_p, repetition penalty)
+- **SQL Repair & Validation**:
+  - Intelligent post-processing of AI output
+  - Regex-based column name quoting
+  - Artifact removal and table reference fixing
+  - Ensures all identifiers properly quoted
+- **Template Fast-Path** (optional optimization):
+  - SHOW ALL, COUNT, AVERAGE, GROUP BY, FILTER patterns
+  - Used only when pattern matches exactly
+  - Falls through to AI for everything else
 
 ### Enhanced for Diverse Databases (November 11, 2025)
 - **Expanded aggregation keywords** to support diverse business databases:

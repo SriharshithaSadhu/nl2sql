@@ -31,6 +31,7 @@ def load_summarization_model(model_name: str = "t5-small"):
     return tokenizer, model
 
 def extract_schema(db_path: str) -> Dict[str, List[str]]:
+    """Extract schema with column names"""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
@@ -54,6 +55,52 @@ def extract_schema(db_path: str) -> Dict[str, List[str]]:
     conn.close()
     return schema
 
+def extract_enhanced_schema(db_path: str) -> Dict[str, Dict]:
+    """Extract rich schema with column types and sample values for AI"""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = cursor.fetchall()
+    
+    enhanced_schema = {}
+    for table in tables:
+        table_name = table[0]
+        try:
+            quoted_table = quote_identifier(table_name)
+            
+            # Get column info with types
+            cursor.execute(f"PRAGMA table_info({quoted_table})")
+            columns_info = cursor.fetchall()
+            
+            columns = {}
+            for col in columns_info:
+                col_name = col[1]
+                col_type = col[2]
+                quoted_col = quote_identifier(col_name)
+                
+                # Get sample values (all distinct values, limited to 50 for performance)
+                try:
+                    cursor.execute(f"SELECT DISTINCT {quoted_col} FROM {quoted_table} LIMIT 50")
+                    samples = [str(row[0]) for row in cursor.fetchall() if row[0] is not None]
+                except:
+                    samples = []
+                
+                columns[col_name] = {
+                    'type': col_type if col_type else 'text',
+                    'samples': samples
+                }
+            
+            enhanced_schema[table_name] = {
+                'columns': columns
+            }
+        except Exception as e:
+            print(f"Warning: Could not extract enhanced schema for '{table_name}': {str(e)}")
+            enhanced_schema[table_name] = {'columns': {}}
+    
+    conn.close()
+    return enhanced_schema
+
 def quote_identifier(name: str) -> str:
     """Properly quote SQL identifiers to handle spaces and reserved words"""
     return f'"{name.replace(chr(34), chr(34)+chr(34))}"'
@@ -66,12 +113,27 @@ def format_schema_for_model(schema: Dict[str, List[str]]) -> str:
     schema_str = '\n'.join(schema_lines)
     return schema_str
 
-def get_template_sql(question: str, table_name: str, columns: List[str]) -> Optional[str]:
-    """Generate SQL from templates for common query patterns"""
+def get_template_sql(question: str, table_name: str, columns: List[str], db_path: str = None) -> Optional[str]:
+    """Generate SQL from templates for common query patterns with value-aware matching"""
     q_lower = question.lower()
     import re
     
     quoted_table = quote_identifier(table_name)
+    
+    # Build value→column mapping from enhanced schema
+    # Structure: {lowercase_value: (column_name, original_value)}
+    value_to_column = {}
+    if db_path:
+        try:
+            enhanced_schema = extract_enhanced_schema(db_path)
+            if table_name in enhanced_schema:
+                for col_name, col_info in enhanced_schema[table_name].get('columns', {}).items():
+                    samples = col_info.get('samples', [])
+                    for sample in samples:
+                        # Map lowercase to both column and original value
+                        value_to_column[sample.lower()] = (col_name, sample)
+        except:
+            pass  # If enhanced schema fails, continue without it
     
     # PRIORITY 1: AGGREGATE FUNCTIONS (must come first!)
     # AVERAGE queries
@@ -167,10 +229,35 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
                     value = text_match.group(1)
                     return f"SELECT * FROM {quoted_table} WHERE {quoted_col} = '{value}'"
     
-    # PRIORITY 3: Text filter patterns (must check AFTER aggregates!)
+    # PRIORITY 3: Value-aware text filter patterns
     # Pattern: "show all Science students" (Science is the filter value)
     if any(word in q_lower for word in ['show', 'list', 'display']) and \
        not any(word in q_lower for word in ['average', 'count', 'sum']):  # Skip if aggregate
+        
+        # First try value-aware matching using sample data
+        if value_to_column:
+            words = question.split()
+            for word in words:
+                word_clean = word.lower().strip('.,!?;:')
+                if len(word_clean) <= 2:
+                    continue
+                
+                # Try exact match first
+                if word_clean in value_to_column:
+                    col_name, original_value = value_to_column[word_clean]
+                    quoted_col = quote_identifier(col_name)
+                    return f"SELECT * FROM {quoted_table} WHERE {quoted_col} = '{original_value}'"
+                
+                # Try partial/substring matching (e.g., "Maths" matches "Mathematics")
+                for sample_val_lower, (col_name, original_value) in value_to_column.items():
+                    # Check if word is substring of sample OR sample is substring of word
+                    if (word_clean in sample_val_lower or sample_val_lower in word_clean) and \
+                       word_clean not in ['show', 'list', 'display', 'all', 'the', 'students', 'records']:
+                        quoted_col = quote_identifier(col_name)
+                        # Use the actual sample value (original_value) not the question word
+                        return f"SELECT * FROM {quoted_table} WHERE {quoted_col} LIKE '%{original_value}%'"
+        
+        # Fallback to column name matching (if column name appears in question)
         for col in columns:
             col_lower = col.lower()
             if col_lower in q_lower:
@@ -194,7 +281,56 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
     
     return None
 
-def generate_sql(question: str, schema_str: str, tokenizer, model) -> str:
+def repair_sql(sql: str, table_name: str, columns: List[str]) -> str:
+    """Intelligently repair and validate AI-generated SQL"""
+    import re
+    
+    quoted_table = quote_identifier(table_name)
+    
+    # Remove artifacts
+    sql = sql.strip()
+    for artifact in ['|', 'table:', 'Table:', 'CREATE TABLE', 'col =']:
+        if artifact in sql:
+            sql = sql.split(artifact)[0].strip()
+    
+    # Fix common table reference issues (but preserve already quoted ones)
+    replacements = [
+        ('FROM table ', f'FROM {quoted_table} '),
+        ('FROM Table ', f'FROM {quoted_table} '),
+    ]
+    # Only replace unquoted table name
+    if f'FROM {table_name}' in sql and f'FROM "{table_name}"' not in sql:
+        sql = sql.replace(f'FROM {table_name}', f'FROM {quoted_table}')
+    for old, new in replacements:
+        sql = sql.replace(old, new)
+    
+    # Quote column names ONLY if they're not already quoted
+    for col in columns:
+        quoted_col = quote_identifier(col)
+        
+        # Skip if column is already quoted in SQL
+        if quoted_col in sql or f'"{col}"' in sql:
+            continue
+        
+        # Match bare (unquoted) column names in various SQL contexts
+        # Use negative lookbehind/lookahead to avoid matching quoted identifiers
+        patterns = [
+            # SELECT column, WHERE column, etc. (not preceded/followed by quotes)
+            (rf'(?<!["\w])({re.escape(col)})(?=\s*[,\s=<>)])', quoted_col),
+            (rf'(?<!["\w])({re.escape(col)})(?=\s+FROM)', quoted_col),
+            (rf'(?<!["\w])({re.escape(col)})$', quoted_col),
+        ]
+        for pattern, replacement in patterns:
+            sql = re.sub(pattern, replacement, sql, flags=re.IGNORECASE)
+    
+    # Ensure it's a SELECT query
+    if not sql.upper().startswith('SELECT') and not sql.upper().startswith('WITH'):
+        sql = f"SELECT * FROM {quoted_table}"
+    
+    return sql
+
+def generate_sql(question: str, schema_str: str, tokenizer, model, db_path: str = None) -> str:
+    """AI-first dynamic SQL generation with templates as fast-path"""
     schema_lines = schema_str.split('\n')
     table_names = []
     all_columns = {}
@@ -213,47 +349,78 @@ def generate_sql(question: str, schema_str: str, tokenizer, model) -> str:
     
     table_name = table_names[0]
     columns = all_columns.get(table_name, [])
-    
-    template_sql = get_template_sql(question, table_name, columns)
-    if template_sql:
-        return template_sql
-    
-    # AI fallback - properly quote identifiers
     quoted_table = quote_identifier(table_name)
     
-    column_types = []
-    for col in columns:
-        quoted_col = quote_identifier(col)
-        column_types.append(f"{quoted_col} text")
+    # Fast-path: Try templates for common queries (with value-aware matching)
+    template_sql = get_template_sql(question, table_name, columns, db_path)
+    if template_sql:
+        print(f"[TEMPLATE FAST-PATH] {question}")
+        return template_sql
     
-    schema_formatted = f"CREATE TABLE {quoted_table} ({', '.join(column_types)})"
+    # AI-first approach with enhanced prompting
+    print(f"[AI-FIRST DYNAMIC] {question}")
     
-    prompt = f"translate English to SQL: {question} {schema_formatted}"
+    # Get enhanced schema with sample values if available
+    enhanced_schema = {}
+    if db_path:
+        try:
+            enhanced_schema = extract_enhanced_schema(db_path)
+        except:
+            pass
+    
+    # Build rich prompt with few-shot examples
+    if table_name in enhanced_schema and enhanced_schema[table_name].get('columns'):
+        # Build schema with types and samples
+        schema_parts = []
+        for col_name, col_info in enhanced_schema[table_name]['columns'].items():
+            quoted_col = quote_identifier(col_name)
+            col_type = col_info.get('type', 'text')
+            samples = col_info.get('samples', [])
+            sample_str = f" (e.g. {', '.join(samples[:2])})" if samples else ""
+            schema_parts.append(f"{quoted_col} {col_type}{sample_str}")
+        schema_detail = ', '.join(schema_parts)
+    else:
+        # Fallback to simple column list
+        schema_detail = ', '.join([quote_identifier(col) for col in columns])
+    
+    # Few-shot prompt with examples
+    prompt = f"""Generate SQLite query.
+
+Table {quoted_table}: {schema_detail}
+
+Examples:
+Q: Show all records
+A: SELECT * FROM {quoted_table}
+
+Q: Count by category
+A: SELECT category, COUNT(*) FROM {quoted_table} GROUP BY category
+
+Q: Where score above 90
+A: SELECT * FROM {quoted_table} WHERE score > 90
+
+Question: {question}
+SQL:"""
     
     inputs = tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True)
     
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_length=128,
-            num_beams=4,
+            max_length=150,
+            num_beams=5,
             early_stopping=True,
-            do_sample=False
+            temperature=0.2,
+            do_sample=True,
+            top_p=0.95,
+            repetition_penalty=1.2
         )
     
     sql = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    sql = sql.strip()
     
-    if '|' in sql or 'table:' in sql or 'CREATE' in sql:
-        sql = sql.split('|')[0].split('CREATE')[0].split('table:')[0].strip()
+    # Repair and validate the generated SQL
+    sql = repair_sql(sql, table_name, columns)
     
-    # Use quoted table name in post-processing
-    sql = sql.replace('FROM table ', f'FROM {quoted_table} ')
-    sql = sql.replace('FROM Table ', f'FROM {quoted_table} ')
-    
-    if not sql.upper().startswith('SELECT') and not sql.upper().startswith('WITH'):
-        sql = f"SELECT * FROM {quoted_table}"
-    
+    print(f"[GENERATED] {sql}")
     return sql
 
 def sanitize_error_message(error_msg: str) -> str:
@@ -550,7 +717,8 @@ def main():
             schema_str = format_schema_for_model(st.session_state.schema)
             
             with st.spinner("🧠 Generating SQL query..."):
-                sql = generate_sql(question, schema_str, nl2sql_tokenizer, nl2sql_model)
+                # Pass db_path for enhanced schema with sample values
+                sql = generate_sql(question, schema_str, nl2sql_tokenizer, nl2sql_model, st.session_state.db_path)
             
             with st.spinner("⚙️ Executing query..."):
                 df, error = execute_sql(sql, st.session_state.db_path)
