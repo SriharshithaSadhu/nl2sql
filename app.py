@@ -17,7 +17,7 @@ st.set_page_config(
 )
 
 @st.cache_resource
-def load_nl2sql_model(model_name: str = "cssupport/t5-small-awesome-text-to-sql"):
+def load_nl2sql_model(model_name: str = "mrm8488/t5-base-finetuned-wikiSQL"):
     hf_token = os.environ.get('HUGGING_FACE_TOKEN', None)
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_name, token=hf_token)
@@ -55,8 +55,59 @@ def format_schema_for_model(schema: Dict[str, List[str]]) -> str:
     schema_str = '\n'.join(schema_lines)
     return schema_str
 
+def get_template_sql(question: str, table_name: str, columns: List[str]) -> Optional[str]:
+    """Generate SQL from templates for common query patterns"""
+    q_lower = question.lower()
+    
+    if any(word in q_lower for word in ['all', 'everything', 'show', 'list', 'display']) and \
+       not any(word in q_lower for word in ['where', 'above', 'below', 'greater', 'less', 'average', 'count']):
+        return f"SELECT * FROM {table_name}"
+    
+    if 'count' in q_lower and not any(word in q_lower for word in ['where', 'above', 'below']):
+        if 'by' in q_lower or 'group' in q_lower:
+            for col in columns:
+                if col in q_lower:
+                    return f"SELECT {col}, COUNT(*) as count FROM {table_name} GROUP BY {col}"
+        return f"SELECT COUNT(*) as total FROM {table_name}"
+    
+    if 'average' in q_lower or 'avg' in q_lower:
+        for col in columns:
+            if col in q_lower:
+                return f"SELECT AVG({col}) as average_{col} FROM {table_name}"
+    
+    return None
+
 def generate_sql(question: str, schema_str: str, tokenizer, model) -> str:
-    prompt = f"Schema: {schema_str}\nQuestion: {question}\nSQL:"
+    schema_lines = schema_str.split('\n')
+    table_names = []
+    all_columns = {}
+    
+    for line in schema_lines:
+        if 'Table' in line and 'has columns:' in line:
+            parts = line.split('has columns:')
+            table_name = parts[0].replace('Table', '').strip()
+            columns_str = parts[1].strip()
+            columns = [c.strip() for c in columns_str.split(',')]
+            table_names.append(table_name)
+            all_columns[table_name] = columns
+    
+    if not table_names:
+        return "SELECT 1"
+    
+    table_name = table_names[0]
+    columns = all_columns.get(table_name, [])
+    
+    template_sql = get_template_sql(question, table_name, columns)
+    if template_sql:
+        return template_sql
+    
+    column_types = []
+    for col in columns:
+        column_types.append(f"{col} text")
+    
+    schema_formatted = f"CREATE TABLE {table_name} ({', '.join(column_types)})"
+    
+    prompt = f"translate English to SQL: {question} {schema_formatted}"
     
     inputs = tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True)
     
@@ -65,10 +116,22 @@ def generate_sql(question: str, schema_str: str, tokenizer, model) -> str:
             **inputs,
             max_length=128,
             num_beams=4,
-            early_stopping=True
+            early_stopping=True,
+            do_sample=False
         )
     
     sql = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    sql = sql.strip()
+    
+    if '|' in sql or 'table:' in sql or 'CREATE' in sql:
+        sql = sql.split('|')[0].split('CREATE')[0].split('table:')[0].strip()
+    
+    sql = sql.replace('FROM table ', f'FROM {table_name} ')
+    sql = sql.replace('FROM Table ', f'FROM {table_name} ')
+    
+    if not sql.upper().startswith('SELECT') and not sql.upper().startswith('WITH'):
+        sql = f"SELECT * FROM {table_name}"
+    
     return sql
 
 def sanitize_error_message(error_msg: str) -> str:
