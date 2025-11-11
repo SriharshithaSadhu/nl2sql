@@ -165,11 +165,31 @@ Preferred communication style: Simple, everyday language.
 - Query history shows questions and status only, never SQL code
 - Maintains server-side SQL logging for debugging while hiding from UI
 
+### AI Model SQL Generation Fixes (November 11, 2025)
+- **Regex-based table placeholder replacement**: Uses word-boundary regex `\bFROM\s+table\b` to catch AI-generated "table" placeholder regardless of trailing characters
+- **Schema-driven prompting**: Dynamically builds few-shot examples using ACTUAL column names from database instead of generic placeholders
+- **Explicit anti-hallucination instruction**: Prompt includes "Never use the word 'table' as a placeholder" to prevent AI from generating invalid SQL
+- **Column whitelist validation**: Post-generation check removes hallucinated columns, falls back to SELECT * while preserving WHERE clauses
+- **Resolved critical bugs**: Fixed "syntax error near 'table'" issues that blocked complex queries
+
+### Multi-Table Upload Support (November 11, 2025)
+- **Multiple file upload**: Accept multiple CSV, Excel, and SQLite files simultaneously
+- **Unified database**: Merges all uploaded files into single SQLite database with separate tables
+- **SQLite file handling**: Attaches source databases and copies tables using proper quoting
+- **Smart table naming**: Cleans filenames to create valid table names (replaces spaces, dashes, dots with underscores)
+- **Comprehensive feedback**: Shows success message listing all created tables
+- **Foreign key detection**: Automatic discovery of relationships using PRAGMA foreign_key_list + heuristic matching
+- **Heuristic matching**: Detects implicit relationships (e.g., "customer_id" → "customers" table)
+- **Table name detection**: Identifies which table is mentioned in question
+- **Multi-table schema in prompts**: AI receives information about all available tables and their relationships
+- **Limitation**: Full cross-table JOIN queries currently limited to single-table context in SQL repair pipeline
+
 ### Testing & Validation
 - Comprehensive end-to-end testing completed with Playwright
 - Verified SQL privacy across all user interactions
-- Confirmed template and AI-based query generation working correctly
-- Tested with diverse databases (orders, customers, products)
+- Confirmed template and AI-based query generation working correctly  
+- Fixed all "syntax error near table" issues - AI now generates valid SQL
+- Tested multi-table upload functionality
 - Verified upload history and chat history features
 - Architect-approved implementation meeting all requirements
 

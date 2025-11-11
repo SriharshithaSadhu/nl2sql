@@ -55,6 +55,69 @@ def extract_schema(db_path: str) -> Dict[str, List[str]]:
     conn.close()
     return schema
 
+def detect_foreign_keys(db_path: str) -> Dict[str, List[Dict]]:
+    """Detect foreign key relationships between tables using PRAGMA and heuristics"""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = [t[0] for t in cursor.fetchall()]
+    
+    relationships = {}  # {table_name: [{from_col, to_table, to_col}]}
+    
+    for table_name in tables:
+        quoted_table = quote_identifier(table_name)
+        relationships[table_name] = []
+        
+        try:
+            # Use PRAGMA foreign_key_list to get explicit foreign keys
+            cursor.execute(f"PRAGMA foreign_key_list({quoted_table})")
+            fks = cursor.fetchall()
+            
+            for fk in fks:
+                relationships[table_name].append({
+                    'from_column': fk[3],  # 'from' column
+                    'to_table': fk[2],     # 'table' column
+                    'to_column': fk[4]     # 'to' column
+                })
+        except:
+            pass
+        
+        # Heuristic matching: column names like "customer_id" → "customers" table
+        try:
+            cursor.execute(f"PRAGMA table_info({quoted_table})")
+            columns = cursor.fetchall()
+            
+            for col in columns:
+                col_name = col[1].lower()
+                
+                # Check for common foreign key patterns
+                if col_name.endswith('_id'):
+                    potential_table = col_name[:-3]  # Remove "_id"
+                    
+                    # Try to find matching table (exact or plural)
+                    for other_table in tables:
+                        other_lower = other_table.lower()
+                        if other_lower == potential_table or \
+                           other_lower == potential_table + 's' or \
+                           other_lower + 's' == potential_table:
+                            # Check if this relationship already exists
+                            exists = any(r['from_column'].lower() == col_name and 
+                                       r['to_table'].lower() == other_table.lower() 
+                                       for r in relationships[table_name])
+                            if not exists:
+                                relationships[table_name].append({
+                                    'from_column': col[1],
+                                    'to_table': other_table,
+                                    'to_column': 'id',  # Assume 'id' as default
+                                    'heuristic': True
+                                })
+        except:
+            pass
+    
+    conn.close()
+    return relationships
+
 def extract_enhanced_schema(db_path: str) -> Dict[str, Dict]:
     """Extract rich schema with column types and sample values for AI"""
     conn = sqlite3.connect(db_path)
@@ -304,16 +367,23 @@ def repair_sql(sql: str, table_name: str, columns: List[str]) -> str:
         if artifact in sql:
             sql = sql.split(artifact)[0].strip()
     
-    # Fix common table reference issues (but preserve already quoted ones)
-    replacements = [
-        ('FROM table ', f'FROM {quoted_table} '),
-        ('FROM Table ', f'FROM {quoted_table} '),
-    ]
+    # Fix table placeholder using word-boundary regex (case-insensitive)
+    # Only replace "table" when it's actually a placeholder (not a legitimate table name)
+    # Be careful with JOIN - only replace if it's really a placeholder
+    sql = re.sub(r'\bFROM\s+table\b', f'FROM {quoted_table}', sql, flags=re.IGNORECASE)
+    
+    # For JOIN, only replace if there's no other table name nearby
+    # This prevents breaking legitimate multi-table JOINs
+    if 'JOIN' in sql.upper():
+        # Check if there are actual table references (quoted or known table names)
+        # If not, it's likely a placeholder
+        if not re.search(r'JOIN\s+"[^"]+"', sql, re.IGNORECASE) and \
+           not any(re.search(rf'JOIN\s+{re.escape(col)}\b', sql, re.IGNORECASE) for col in columns if col.lower() != 'table'):
+            sql = re.sub(r'\bJOIN\s+table\b', f'JOIN {quoted_table}', sql, flags=re.IGNORECASE)
+    
     # Only replace unquoted table name
     if f'FROM {table_name}' in sql and f'FROM "{table_name}"' not in sql:
         sql = sql.replace(f'FROM {table_name}', f'FROM {quoted_table}')
-    for old, new in replacements:
-        sql = sql.replace(old, new)
     
     # Quote column names ONLY if they're not already quoted
     for col in columns:
@@ -333,6 +403,29 @@ def repair_sql(sql: str, table_name: str, columns: List[str]) -> str:
         ]
         for pattern, replacement in patterns:
             sql = re.sub(pattern, replacement, sql, flags=re.IGNORECASE)
+    
+    # Column whitelist check: Remove hallucinated columns
+    # Extract columns mentioned in SQL (between SELECT and FROM)
+    select_match = re.search(r'SELECT\s+(.*?)\s+FROM', sql, re.IGNORECASE | re.DOTALL)
+    if select_match and select_match.group(1).strip() not in ['*', 'COUNT(*)', 'COUNT(*)']:
+        select_clause = select_match.group(1)
+        # Check if any column in SELECT is not in the actual column list
+        contains_invalid = False
+        for word in re.findall(r'\b\w+\b', select_clause):
+            if word.upper() not in ['SELECT', 'FROM', 'WHERE', 'COUNT', 'AVG', 'SUM', 'MAX', 'MIN', 'AS', 'DISTINCT']:
+                # Check if it's a known column (case-insensitive)
+                if word.lower() not in [c.lower() for c in columns]:
+                    contains_invalid = True
+                    break
+        
+        # If SQL contains invalid columns, fall back to SELECT *
+        if contains_invalid:
+            # Keep WHERE clause if present
+            where_match = re.search(r'WHERE\s+(.+?)(?:ORDER|GROUP|LIMIT|$)', sql, re.IGNORECASE | re.DOTALL)
+            if where_match:
+                sql = f"SELECT * FROM {quoted_table} WHERE {where_match.group(1).strip()}"
+            else:
+                sql = f"SELECT * FROM {quoted_table}"
     
     # Ensure it's a SELECT query
     if not sql.upper().startswith('SELECT') and not sql.upper().startswith('WITH'):
@@ -358,7 +451,15 @@ def generate_sql(question: str, schema_str: str, tokenizer, model, db_path: str 
     if not table_names:
         return "SELECT 1"
     
-    table_name = table_names[0]
+    # Detect which tables are mentioned in the question
+    q_lower = question.lower()
+    mentioned_tables = [t for t in table_names if t.lower() in q_lower]
+    
+    # Use mentioned table or fall back to first table
+    if mentioned_tables:
+        table_name = mentioned_tables[0]
+    else:
+        table_name = table_names[0]
     columns = all_columns.get(table_name, [])
     quoted_table = quote_identifier(table_name)
     
@@ -371,11 +472,13 @@ def generate_sql(question: str, schema_str: str, tokenizer, model, db_path: str 
     # AI-first approach with enhanced prompting
     print(f"[AI-FIRST DYNAMIC] {question}")
     
-    # Get enhanced schema with sample values if available
+    # Get enhanced schema with sample values and foreign keys if available
     enhanced_schema = {}
+    foreign_keys = {}
     if db_path:
         try:
             enhanced_schema = extract_enhanced_schema(db_path)
+            foreign_keys = detect_foreign_keys(db_path)
         except:
             pass
     
@@ -394,20 +497,54 @@ def generate_sql(question: str, schema_str: str, tokenizer, model, db_path: str 
         # Fallback to simple column list
         schema_detail = ', '.join([quote_identifier(col) for col in columns])
     
-    # Few-shot prompt with examples
-    prompt = f"""Generate SQLite query.
+    # Build dynamic examples using ACTUAL columns from schema
+    example_column = columns[0] if columns else "id"  # Use first actual column
+    example_column_quoted = quote_identifier(example_column)
+    
+    # Find a numeric column for comparison examples
+    numeric_col = None
+    if table_name in enhanced_schema and enhanced_schema[table_name].get('columns'):
+        for col_name, col_info in enhanced_schema[table_name]['columns'].items():
+            if col_info.get('type', '').lower() in ['integer', 'real', 'numeric', 'decimal', 'float']:
+                numeric_col = col_name
+                break
+    if not numeric_col and len(columns) > 1:
+        numeric_col = columns[1]  # Fallback to second column
+    numeric_col_quoted = quote_identifier(numeric_col) if numeric_col else example_column_quoted
+    
+    # Build multi-table schema info if available
+    all_tables_schema = ""
+    if len(table_names) > 1:
+        all_tables_schema = "\n\nAvailable Tables:\n"
+        for tbl in table_names:
+            tbl_cols = all_columns.get(tbl, [])
+            all_tables_schema += f"- {quote_identifier(tbl)}: {', '.join([quote_identifier(c) for c in tbl_cols])}\n"
+        
+        # Add FK relationships if detected
+        if foreign_keys and table_name in foreign_keys and foreign_keys[table_name]:
+            all_tables_schema += f"\nRelationships for {quoted_table}:\n"
+            for fk in foreign_keys[table_name]:
+                from_col = quote_identifier(fk['from_column'])
+                to_table = quote_identifier(fk['to_table'])
+                to_col = quote_identifier(fk.get('to_column', 'id'))
+                all_tables_schema += f"- {from_col} → {to_table}.{to_col}\n"
+    
+    # Few-shot prompt with ACTUAL schema-based examples
+    prompt = f"""Generate SQLite query using the exact table and column names provided.
 
-Table {quoted_table}: {schema_detail}
+IMPORTANT: Use table and column names EXACTLY as listed below. Never use the word "table" as a placeholder.
 
-Examples:
+Primary Table: {quoted_table} has columns: {schema_detail}{all_tables_schema}
+
+Examples with ACTUAL column names:
 Q: Show all records
 A: SELECT * FROM {quoted_table}
 
-Q: Count by category
-A: SELECT category, COUNT(*) FROM {quoted_table} GROUP BY category
+Q: Count by {example_column}
+A: SELECT {example_column_quoted}, COUNT(*) FROM {quoted_table} GROUP BY {example_column_quoted}
 
-Q: Where score above 90
-A: SELECT * FROM {quoted_table} WHERE score > 90
+Q: Where {numeric_col if numeric_col else example_column} above 90
+A: SELECT * FROM {quoted_table} WHERE {numeric_col_quoted} > 90
 
 Question: {question}
 SQL:"""
@@ -558,99 +695,118 @@ def main():
     with st.sidebar:
         st.header("📁 Database Upload")
         
-        uploaded_file = st.file_uploader(
-            "Upload your database",
+        uploaded_files = st.file_uploader(
+            "Upload your database files (multiple files supported for related tables)",
             type=['csv', 'xls', 'xlsx', 'db', 'sqlite', 'sqlite3'],
-            help="Upload a CSV, Excel (XLS/XLSX), or SQLite database"
+            help="Upload CSV, Excel (XLS/XLSX), or SQLite databases. You can upload multiple files to create related tables.",
+            accept_multiple_files=True
         )
         
-        if uploaded_file:
-            file_ext = uploaded_file.name.split('.')[-1].lower()
-            
+        if uploaded_files:
+            import datetime
             temp_dir = tempfile.gettempdir()
+            db_path = os.path.join(temp_dir, "uploaded_db.sqlite")
             
-            if file_ext in ['csv', 'xls', 'xlsx']:
-                # Convert CSV or Excel to SQLite
-                if file_ext == 'csv':
-                    st.info("Converting CSV to SQLite database...")
-                    df = pd.read_csv(uploaded_file)
-                    file_type = "CSV"
-                elif file_ext in ['xls', 'xlsx']:
-                    st.info("Converting Excel to SQLite database...")
-                    df = pd.read_excel(uploaded_file, engine='openpyxl' if file_ext == 'xlsx' else 'xlrd')
-                    file_type = "Excel"
-                
-                db_path = os.path.join(temp_dir, "uploaded_db.sqlite")
-                
-                if os.path.exists(db_path):
-                    os.remove(db_path)
-                
-                conn = sqlite3.connect(db_path)
-                
-                # Clean table name
-                table_name = uploaded_file.name.rsplit('.', 1)[0]  # Remove extension
-                table_name = table_name.replace(' ', '_').replace('-', '_').replace('.', '_')
-                df.to_sql(table_name, conn, if_exists='replace', index=False)
-                conn.close()
-                
-                st.session_state.db_path = db_path
-                st.session_state.schema = extract_schema(db_path)
-                
-                # Add to upload history
-                import datetime
-                upload_entry = {
-                    'filename': uploaded_file.name,
-                    'type': file_type,
-                    'table': table_name,
-                    'rows': len(df),
-                    'columns': list(df.columns),
-                    'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }
-                st.session_state.upload_history.append(upload_entry)
-                
-                st.success(f"✅ {file_type} converted to database with table: `{table_name}`")
+            # Remove existing database to start fresh
+            if os.path.exists(db_path):
+                os.remove(db_path)
             
-            else:
-                db_path = os.path.join(temp_dir, uploaded_file.name)
-                with open(db_path, 'wb') as f:
-                    f.write(uploaded_file.getbuffer())
+            # Create new database
+            conn = sqlite3.connect(db_path)
+            tables_created = []
+            
+            # Process each uploaded file
+            for uploaded_file in uploaded_files:
+                file_ext = uploaded_file.name.split('.')[-1].lower()
                 
-                st.session_state.db_path = db_path
-                st.session_state.schema = extract_schema(db_path)
+                if file_ext in ['csv', 'xls', 'xlsx']:
+                    # Convert CSV or Excel to SQLite table
+                    if file_ext == 'csv':
+                        df = pd.read_csv(uploaded_file)
+                        file_type = "CSV"
+                    elif file_ext in ['xls', 'xlsx']:
+                        df = pd.read_excel(uploaded_file, engine='openpyxl' if file_ext == 'xlsx' else 'xlrd')
+                        file_type = "Excel"
+                    
+                    # Clean table name
+                    table_name = uploaded_file.name.rsplit('.', 1)[0]  # Remove extension
+                    table_name = table_name.replace(' ', '_').replace('-', '_').replace('.', '_')
+                    
+                    # Add table to database
+                    df.to_sql(table_name, conn, if_exists='replace', index=False)
+                    tables_created.append({
+                        'name': table_name,
+                        'filename': uploaded_file.name,
+                        'type': file_type,
+                        'rows': len(df),
+                        'columns': list(df.columns)
+                    })
                 
-                # Add to upload history with complete metadata
-                import datetime
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                
-                # Calculate total rows across all tables with proper quoting
-                total_rows = 0
-                all_columns = []
-                for table_name in st.session_state.schema.keys():
-                    try:
-                        # Properly quote table names to handle spaces and reserved words
+                elif file_ext in ['db', 'sqlite', 'sqlite3']:
+                    # For SQLite files, copy tables to main database
+                    temp_sqlite_path = os.path.join(temp_dir, uploaded_file.name)
+                    with open(temp_sqlite_path, 'wb') as f:
+                        f.write(uploaded_file.getbuffer())
+                    
+                    # Attach and copy tables
+                    cursor = conn.cursor()
+                    cursor.execute(f"ATTACH DATABASE '{temp_sqlite_path}' AS source_db")
+                    
+                    cursor.execute("SELECT name FROM source_db.sqlite_master WHERE type='table'")
+                    source_tables = cursor.fetchall()
+                    
+                    for table in source_tables:
+                        table_name = table[0]
                         quoted_table = quote_identifier(table_name)
-                        cursor.execute(f"SELECT COUNT(*) FROM {quoted_table}")
-                        table_rows = cursor.fetchone()[0]
-                        total_rows += table_rows
-                        all_columns.extend(st.session_state.schema[table_name])
-                    except Exception as e:
-                        # Log error but continue with other tables
-                        st.warning(f"Could not count rows in table '{table_name}': {str(e)}")
-                        all_columns.extend(st.session_state.schema[table_name])
-                
-                conn.close()
-                
+                        
+                        try:
+                            # Copy table structure and data
+                            cursor.execute(f"CREATE TABLE IF NOT EXISTS {quoted_table} AS SELECT * FROM source_db.{quoted_table}")
+                            
+                            cursor.execute(f"SELECT COUNT(*) FROM {quoted_table}")
+                            row_count = cursor.fetchone()[0]
+                            
+                            cursor.execute(f"PRAGMA table_info({quoted_table})")
+                            cols = cursor.fetchall()
+                            col_names = [col[1] for col in cols]
+                            
+                            tables_created.append({
+                                'name': table_name,
+                                'filename': uploaded_file.name,
+                                'type': 'SQLite',
+                                'rows': row_count,
+                                'columns': col_names
+                            })
+                        except Exception as e:
+                            st.warning(f"Could not import table '{table_name}': {str(e)}")
+                    
+                    cursor.execute("DETACH DATABASE source_db")
+                    conn.commit()
+            
+            conn.close()
+            
+            # Update session state
+            st.session_state.db_path = db_path
+            st.session_state.schema = extract_schema(db_path)
+            
+            # Add to upload history
+            for table_info in tables_created:
                 upload_entry = {
-                    'filename': uploaded_file.name,
-                    'type': 'SQLite',
-                    'rows': total_rows,
-                    'columns': all_columns,
+                    'filename': table_info['filename'],
+                    'type': table_info['type'],
+                    'table': table_info['name'],
+                    'rows': table_info['rows'],
+                    'columns': table_info['columns'],
                     'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
                 st.session_state.upload_history.append(upload_entry)
-                
-                st.success("✅ Database uploaded successfully!")
+            
+            # Success message
+            if len(tables_created) == 1:
+                st.success(f"✅ Uploaded 1 table: `{tables_created[0]['name']}`")
+            else:
+                table_names = ', '.join([f"`{t['name']}`" for t in tables_created])
+                st.success(f"✅ Uploaded {len(tables_created)} tables: {table_names}")
         
         # Upload History
         if st.session_state.upload_history:
