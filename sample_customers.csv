@@ -1,0 +1,6 @@
+customer_id,name,email,city,country,total_purchases,membership_level
+101,John Smith,john@email.com,New York,USA,1500.00,Gold
+102,Sarah Johnson,sarah@email.com,London,UK,850.50,Silver
+103,Mike Brown,mike@email.com,Toronto,Canada,425.00,Bronze
+104,Emily Davis,emily@email.com,Sydney,Australia,1050.00,Gold
+105,Lisa Wilson,lisa@email.com,Berlin,Germany,900.00,Silver
