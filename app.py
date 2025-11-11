@@ -58,78 +58,9 @@ def format_schema_for_model(schema: Dict[str, List[str]]) -> str:
 def get_template_sql(question: str, table_name: str, columns: List[str]) -> Optional[str]:
     """Generate SQL from templates for common query patterns"""
     q_lower = question.lower()
-    
-    # FILTER queries with WHERE conditions (greater than, less than, equals)
     import re
     
-    for col in columns:
-        if col in q_lower:
-            # Greater than queries
-            if any(word in q_lower for word in ['greater than', 'more than', 'above', '>']):
-                # Try to extract the number
-                number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
-                if number_match:
-                    value = number_match.group(1)
-                    return f"SELECT * FROM {table_name} WHERE {col} > {value}"
-            
-            # Less than queries
-            if any(word in q_lower for word in ['less than', 'below', 'under', '<']):
-                number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
-                if number_match:
-                    value = number_match.group(1)
-                    return f"SELECT * FROM {table_name} WHERE {col} < {value}"
-            
-            # Equals queries
-            if any(word in q_lower for word in ['equals', 'equal to', '=', 'is ']):
-                # Try number first
-                number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
-                if number_match:
-                    value = number_match.group(1)
-                    return f"SELECT * FROM {table_name} WHERE {col} = {value}"
-                # Otherwise look for quoted text
-                text_match = re.search(r"['\"]([^'\"]+)['\"]", q_lower)
-                if text_match:
-                    value = text_match.group(1)
-                    return f"SELECT * FROM {table_name} WHERE {col} = '{value}'"
-    
-    # Text filter: "show all X students" or "show X records"
-    # Pattern: "show/display/list all [VALUE] [COLUMN]" or "show [VALUE] [COLUMN]"
-    for col in columns:
-        col_lower = col.lower()
-        # Look for pattern like "Science students" where students/records refers to rows
-        # and Science is the value
-        if col_lower in q_lower:
-            # Find potential filter values (capitalized words that aren't SQL keywords)
-            words = question.split()
-            for i, word in enumerate(words):
-                # Skip common query words
-                if word.lower() in ['show', 'all', 'the', 'list', 'display', 'get', 'find', 'select']:
-                    continue
-                # Check if this word appears before the column name in the question
-                if word.lower() not in ['students', 'records', 'rows', 'entries', 'data'] and \
-                   word.lower() != col_lower and \
-                   len(word) > 2:
-                    # This might be a filter value
-                    # Check if it appears before mentions of the column
-                    word_pos = q_lower.find(word.lower())
-                    col_pos = q_lower.find(col_lower)
-                    if word_pos < col_pos and word_pos != -1:
-                        # Use LIKE for case-insensitive partial matching
-                        return f"SELECT * FROM {table_name} WHERE {col} LIKE '%{word}%'"
-    
-    # SHOW ALL queries (no filters)
-    if any(word in q_lower for word in ['all', 'everything', 'show', 'list', 'display']) and \
-       not any(word in q_lower for word in ['where', 'above', 'below', 'greater', 'less', 'average', 'count']):
-        return f"SELECT * FROM {table_name}"
-    
-    # COUNT queries
-    if 'count' in q_lower and not any(word in q_lower for word in ['where', 'above', 'below']):
-        if 'by' in q_lower or 'group' in q_lower:
-            for col in columns:
-                if col in q_lower:
-                    return f"SELECT {col}, COUNT(*) as count FROM {table_name} GROUP BY {col}"
-        return f"SELECT COUNT(*) as total FROM {table_name}"
-    
+    # PRIORITY 1: AGGREGATE FUNCTIONS (must come first!)
     # AVERAGE queries
     if 'average' in q_lower or 'avg' in q_lower:
         # Check for "average X by Y" pattern (with GROUP BY)
@@ -165,6 +96,68 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
         for col in columns:
             if col in q_lower:
                 return f"SELECT AVG({col}) as average_{col} FROM {table_name}"
+    
+    # COUNT queries
+    if 'count' in q_lower and not any(word in q_lower for word in ['where', 'above', 'below']):
+        if 'by' in q_lower or 'group' in q_lower:
+            for col in columns:
+                if col in q_lower:
+                    return f"SELECT {col}, COUNT(*) as count FROM {table_name} GROUP BY {col}"
+        return f"SELECT COUNT(*) as total FROM {table_name}"
+    
+    # PRIORITY 2: FILTER queries with WHERE conditions
+    for col in columns:
+        if col in q_lower:
+            # Greater than queries
+            if any(word in q_lower for word in ['greater than', 'more than', 'above', '>']):
+                number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
+                if number_match:
+                    value = number_match.group(1)
+                    return f"SELECT * FROM {table_name} WHERE {col} > {value}"
+            
+            # Less than queries
+            if any(word in q_lower for word in ['less than', 'below', 'under', '<']):
+                number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
+                if number_match:
+                    value = number_match.group(1)
+                    return f"SELECT * FROM {table_name} WHERE {col} < {value}"
+            
+            # Equals queries (explicit)
+            if any(word in q_lower for word in ['equals', 'equal to', '=']):
+                # Try number first
+                number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
+                if number_match:
+                    value = number_match.group(1)
+                    return f"SELECT * FROM {table_name} WHERE {col} = {value}"
+                # Otherwise look for quoted text
+                text_match = re.search(r"['\"]([^'\"]+)['\"]", q_lower)
+                if text_match:
+                    value = text_match.group(1)
+                    return f"SELECT * FROM {table_name} WHERE {col} = '{value}'"
+    
+    # PRIORITY 3: Text filter patterns (must check AFTER aggregates!)
+    # Pattern: "show all Science students" (Science is the filter value)
+    if any(word in q_lower for word in ['show', 'list', 'display']) and \
+       not any(word in q_lower for word in ['average', 'count', 'sum']):  # Skip if aggregate
+        for col in columns:
+            col_lower = col.lower()
+            if col_lower in q_lower:
+                words = question.split()
+                for i, word in enumerate(words):
+                    if word.lower() in ['show', 'all', 'the', 'list', 'display', 'get', 'find', 'select']:
+                        continue
+                    if word.lower() not in ['students', 'records', 'rows', 'entries', 'data'] and \
+                       word.lower() != col_lower and \
+                       len(word) > 2:
+                        word_pos = q_lower.find(word.lower())
+                        col_pos = q_lower.find(col_lower)
+                        if word_pos < col_pos and word_pos != -1:
+                            return f"SELECT * FROM {table_name} WHERE {col} LIKE '%{word}%'"
+    
+    # PRIORITY 4: SHOW ALL queries (default)
+    if any(word in q_lower for word in ['all', 'everything', 'show', 'list', 'display']) and \
+       not any(word in q_lower for word in ['where', 'above', 'below', 'greater', 'less', 'average', 'count']):
+        return f"SELECT * FROM {table_name}"
     
     return None
 
