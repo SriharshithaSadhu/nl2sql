@@ -69,16 +69,30 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
             avg_col = None
             group_col = None
             
-            # Common aggregation columns
-            agg_keywords = ['score', 'price', 'amount', 'value', 'salary', 'revenue', 'sales']
-            for keyword in agg_keywords:
-                if keyword in q_lower:
-                    for col in columns:
-                        if keyword in col.lower():
-                            avg_col = col
-                            break
-                    if avg_col:
+            # Common aggregation columns (expanded for diverse databases)
+            agg_keywords = ['score', 'price', 'amount', 'value', 'salary', 'revenue', 'sales', 
+                           'cost', 'total', 'quantity', 'qty', 'count', 'number', 'rate',
+                           'balance', 'payment', 'profit', 'discount', 'tax', 'fee', 'charge']
+            
+            # First, try to find numeric columns mentioned in question
+            for col in columns:
+                if col.lower() in q_lower:
+                    # Check if it's likely a numeric column
+                    col_lower = col.lower()
+                    if any(kw in col_lower for kw in agg_keywords):
+                        avg_col = col
                         break
+            
+            # Fallback: search by keyword
+            if not avg_col:
+                for keyword in agg_keywords:
+                    if keyword in q_lower:
+                        for col in columns:
+                            if keyword in col.lower():
+                                avg_col = col
+                                break
+                        if avg_col:
+                            break
             
             # Find group by column (after "by")
             by_index = q_lower.find(' by ')
@@ -327,12 +341,17 @@ def main():
     st.title("🗄️ AskDB - Natural Language to SQL Query System")
     st.markdown("Ask questions about your database in plain English and get SQL-powered answers!")
     
+    # Initialize session state
     if 'db_path' not in st.session_state:
         st.session_state.db_path = None
     if 'schema' not in st.session_state:
         st.session_state.schema = None
     if 'query_history' not in st.session_state:
         st.session_state.query_history = []
+    if 'upload_history' not in st.session_state:
+        st.session_state.upload_history = []
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
     
     with st.sidebar:
         st.header("📁 Database Upload")
@@ -374,6 +393,19 @@ def main():
                 
                 st.session_state.db_path = db_path
                 st.session_state.schema = extract_schema(db_path)
+                
+                # Add to upload history
+                import datetime
+                upload_entry = {
+                    'filename': uploaded_file.name,
+                    'type': file_type,
+                    'table': table_name,
+                    'rows': len(df),
+                    'columns': list(df.columns),
+                    'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                st.session_state.upload_history.append(upload_entry)
+                
                 st.success(f"✅ {file_type} converted to database with table: `{table_name}`")
             
             else:
@@ -383,7 +415,29 @@ def main():
                 
                 st.session_state.db_path = db_path
                 st.session_state.schema = extract_schema(db_path)
+                
+                # Add to upload history
+                import datetime
+                upload_entry = {
+                    'filename': uploaded_file.name,
+                    'type': 'SQLite',
+                    'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                st.session_state.upload_history.append(upload_entry)
+                
                 st.success("✅ Database uploaded successfully!")
+        
+        # Upload History
+        if st.session_state.upload_history:
+            st.subheader("📂 Upload History")
+            for upload in reversed(st.session_state.upload_history[-5:]):  # Show last 5
+                with st.expander(f"📄 {upload['filename']}", expanded=False):
+                    st.write(f"**Type:** {upload['type']}")
+                    st.write(f"**Time:** {upload['timestamp']}")
+                    if 'rows' in upload:
+                        st.write(f"**Rows:** {upload['rows']}")
+                    if 'columns' in upload:
+                        st.write(f"**Columns:** {len(upload['columns'])}")
         
         if st.session_state.schema:
             st.subheader("📋 Database Schema")
@@ -410,18 +464,21 @@ def main():
             st.write("Automatic chart generation for numeric data")
         
         st.markdown("### 📝 Example Questions")
+        st.markdown("**📊 For any database (orders, customers, products, etc.):**")
         st.code("""
 • Show all records
-• List the top 10 entries
-• What is the average of column_name?
-• Count records grouped by category
-• Find all entries where value > 100
+• Get average price by category
+• Count orders by customer
+• Show customers where total > 1000
+• List products with price less than 50
+• Average revenue by month
+• Top 10 highest sales
         """)
         return
     
     st.success(f"🗄️ Database loaded with {len(st.session_state.schema)} table(s)")
     
-    tab1, tab2 = st.tabs(["💬 Ask a Question", "📜 Query History"])
+    tab1, tab2, tab3 = st.tabs(["💬 Ask a Question", "💭 Chat History", "📜 Query History"])
     
     with tab1:
         st.subheader("Ask Your Question")
@@ -457,6 +514,16 @@ def main():
                     'success': False,
                     'error': error
                 })
+                
+                # Add to chat history
+                import datetime
+                st.session_state.chat_history.append({
+                    'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'question': question,
+                    'answer': f"Error: {error}",
+                    'rows': 0,
+                    'success': False
+                })
             elif df is not None:
                 st.success(f"✅ Query executed successfully! Found {len(df)} rows.")
                 
@@ -479,8 +546,47 @@ def main():
                     'rows': len(df),
                     'success': True
                 })
+                
+                # Add to chat history
+                import datetime
+                st.session_state.chat_history.append({
+                    'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'question': question,
+                    'answer': summary if not df.empty else "Query executed successfully",
+                    'rows': len(df),
+                    'success': True,
+                    'result_preview': df.head(3).to_dict('records') if not df.empty else []
+                })
     
     with tab2:
+        st.subheader("💭 Chat History")
+        
+        if not st.session_state.chat_history:
+            st.info("No conversations yet. Ask a question to start chatting!")
+        else:
+            for idx, chat in enumerate(reversed(st.session_state.chat_history)):
+                with st.container():
+                    st.markdown(f"**🕐 {chat['timestamp']}**")
+                    
+                    # User question
+                    st.markdown(f"**👤 You:** {chat['question']}")
+                    
+                    # System answer
+                    if chat['success']:
+                        st.markdown(f"**🤖 AskDB:** {chat['answer']}")
+                        st.caption(f"✅ Found {chat['rows']} rows")
+                        
+                        # Show preview of results
+                        if chat.get('result_preview'):
+                            with st.expander("View result preview"):
+                                preview_df = pd.DataFrame(chat['result_preview'])
+                                st.dataframe(preview_df, use_container_width=True)
+                    else:
+                        st.markdown(f"**🤖 AskDB:** ❌ {chat['answer']}")
+                    
+                    st.divider()
+    
+    with tab3:
         st.subheader("Query History")
         
         if not st.session_state.query_history:
