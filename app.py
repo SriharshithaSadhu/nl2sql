@@ -59,10 +59,46 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
     """Generate SQL from templates for common query patterns"""
     q_lower = question.lower()
     
+    # FILTER queries with WHERE conditions (greater than, less than, equals)
+    for col in columns:
+        if col in q_lower:
+            # Greater than queries
+            if any(word in q_lower for word in ['greater than', 'more than', 'above', '>']):
+                import re
+                # Try to extract the number
+                number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
+                if number_match:
+                    value = number_match.group(1)
+                    return f"SELECT * FROM {table_name} WHERE {col} > {value}"
+            
+            # Less than queries
+            if any(word in q_lower for word in ['less than', 'below', 'under', '<']):
+                import re
+                number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
+                if number_match:
+                    value = number_match.group(1)
+                    return f"SELECT * FROM {table_name} WHERE {col} < {value}"
+            
+            # Equals queries
+            if any(word in q_lower for word in ['equals', 'equal to', '=', 'is ']):
+                import re
+                # Try number first
+                number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
+                if number_match:
+                    value = number_match.group(1)
+                    return f"SELECT * FROM {table_name} WHERE {col} = {value}"
+                # Otherwise look for quoted text
+                text_match = re.search(r"['\"]([^'\"]+)['\"]", q_lower)
+                if text_match:
+                    value = text_match.group(1)
+                    return f"SELECT * FROM {table_name} WHERE {col} = '{value}'"
+    
+    # SHOW ALL queries (no filters)
     if any(word in q_lower for word in ['all', 'everything', 'show', 'list', 'display']) and \
        not any(word in q_lower for word in ['where', 'above', 'below', 'greater', 'less', 'average', 'count']):
         return f"SELECT * FROM {table_name}"
     
+    # COUNT queries
     if 'count' in q_lower and not any(word in q_lower for word in ['where', 'above', 'below']):
         if 'by' in q_lower or 'group' in q_lower:
             for col in columns:
@@ -70,6 +106,7 @@ def get_template_sql(question: str, table_name: str, columns: List[str]) -> Opti
                     return f"SELECT {col}, COUNT(*) as count FROM {table_name} GROUP BY {col}"
         return f"SELECT COUNT(*) as total FROM {table_name}"
     
+    # AVERAGE queries
     if 'average' in q_lower or 'avg' in q_lower:
         for col in columns:
             if col in q_lower:
