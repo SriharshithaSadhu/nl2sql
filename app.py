@@ -274,11 +274,22 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
                             quoted_col = quote_identifier(col)
                             return f"SELECT * FROM {quoted_table} WHERE {quoted_col} LIKE '%{word}%'"
     
-    # PRIORITY 4: SHOW ALL queries (default)
-    if any(word in q_lower for word in ['all', 'everything', 'show', 'list', 'display']) and \
-       not any(word in q_lower for word in ['where', 'above', 'below', 'greater', 'less', 'average', 'count']):
+    # PRIORITY 4: SHOW ALL queries (only for genuine "show all" without potential filter values)
+    # If the question has specific words that could be values, skip SHOW ALL and fall back to AI
+    question_words = [w.lower().strip('.,!?;:') for w in question.split()]
+    potential_filters = [w for w in question_words if len(w) > 3 and w not in [
+        'show', 'all', 'the', 'list', 'display', 'get', 'find', 'select',
+        'students', 'records', 'rows', 'entries', 'data', 'everything',
+        'items', 'values', 'results', 'table', 'from', 'where'
+    ]]
+    
+    # Only use SHOW ALL if there are NO potential filter words (genuine "show all" request)
+    if any(word in q_lower for word in ['all', 'everything']) and \
+       not any(word in q_lower for word in ['where', 'above', 'below', 'greater', 'less', 'average', 'count']) and \
+       len(potential_filters) == 0:
         return f"SELECT * FROM {quoted_table}"
     
+    # Return None to fall back to AI for unmatched filter queries
     return None
 
 def repair_sql(sql: str, table_name: str, columns: List[str]) -> str:

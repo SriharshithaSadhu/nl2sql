@@ -100,23 +100,37 @@ Preferred communication style: Simple, everyday language.
   - T5 model (WikiSQL fine-tuned) as main query generator
   - Templates retained as fast-path optimization only
   - Handles ANY query type dynamically like an "SQL master"
+  - **Guaranteed AI fallback** for unmatched queries
+  
+- **Value-Aware Template Matching**:
+  - Extracts up to 50 distinct values per column from database
+  - Builds value→column mapping for intelligent matching
+  - **Exact matching**: "Science" → `WHERE "subject" = 'Science'`
+  - **Partial matching**: "Maths" → `WHERE "subject" LIKE '%Mathematics%'`
+  - Handles user queries with VALUES instead of COLUMN NAMES
+  - Falls back to AI when value not in samples
+  
 - **Enhanced Schema Extraction**:
-  - Extracts column types and sample values
-  - Provides rich context to AI model
-  - Helps model understand data patterns
+  - Extracts column types and up to 50 sample values per column
+  - Provides rich context to both templates and AI model
+  - Helps AI understand data patterns and generate accurate SQL
+  
 - **Few-Shot Prompting**:
   - Structured prompts with examples
-  - Table and column details with types
+  - Table and column details with types and sample values
   - Better generation parameters (temperature, top_p, repetition penalty)
+  
 - **SQL Repair & Validation**:
   - Intelligent post-processing of AI output
-  - Regex-based column name quoting
+  - Regex-based column name quoting (skips already-quoted)
   - Artifact removal and table reference fixing
   - Ensures all identifiers properly quoted
-- **Template Fast-Path** (optional optimization):
-  - SHOW ALL, COUNT, AVERAGE, GROUP BY, FILTER patterns
-  - Used only when pattern matches exactly
-  - Falls through to AI for everything else
+  
+- **Smart Template Fast-Path**:
+  - SHOW ALL (only genuine requests), COUNT, AVERAGE, GROUP BY
+  - Value-aware FILTER (exact + partial matching)
+  - Returns None when unsure → falls back to AI
+  - Never blocks AI fallback incorrectly
 
 ### Enhanced for Diverse Databases (November 11, 2025)
 - **Expanded aggregation keywords** to support diverse business databases:
