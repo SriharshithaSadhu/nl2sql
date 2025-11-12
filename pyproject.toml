@@ -2,7 +2,7 @@
 name = "repl-nix-workspace"
 version = "0.1.0"
 description = "Add your description here"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "bcrypt>=5.0.0",
     "openpyxl>=3.1.5",
@@ -13,7 +13,7 @@ dependencies = [
     "sqlalchemy>=2.0.44",
     "streamlit>=1.51.0",
     "torch>=2.9.0",
-    "transformers>=4.57.1",
+    "transformers",
     "xlrd>=2.0.2",
 ]
 
@@ -326,6 +326,7 @@ dataclass-array = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'
 dataeval = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 datarobot-drum = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 datarobotx = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
+datasets = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 datumaro = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 dctorch = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 deep-utils = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
@@ -391,6 +392,7 @@ etils = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 etna = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 evadb = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 evalscope = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
+evaluate = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 exllamav2 = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 extractable = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 face-alignment = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
@@ -1063,6 +1065,8 @@ trainer = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 transformer-engine = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 transformer-lens = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 transformer-smaller-training-vocab = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
+transformers = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
+transformers-domain-adaptation = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 transfusion-pytorch = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 transparent-background = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 treescope = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
