@@ -463,11 +463,22 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
     # PRIORITY 4: SHOW ALL queries (only for genuine "show all" without potential filter values)
     # If the question has specific words that could be values, skip SHOW ALL and fall back to AI
     question_words = [w.lower().strip('.,!?;:') for w in question.split()]
+    
+    # Exclude table name variations from potential filters
+    table_name_lower = table_name.lower()
+    table_base = table_name_lower.replace('sample_', '').replace('tbl_', '').replace('tb_', '')
+    table_variations = [table_name_lower, table_base]
+    if table_base.endswith('s'):
+        table_variations.append(table_base[:-1])  # singular
+    else:
+        table_variations.append(table_base + 's')  # plural
+    
     potential_filters = [w for w in question_words if len(w) > 3 and w not in [
         'show', 'all', 'the', 'list', 'display', 'get', 'find', 'select',
         'students', 'records', 'rows', 'entries', 'data', 'everything',
-        'items', 'values', 'results', 'table', 'from', 'where'
-    ]]
+        'items', 'values', 'results', 'table', 'from', 'where', 'customers',
+        'orders', 'products', 'people', 'users'
+    ] and w not in table_variations]  # Exclude table name variations
     
     # Only use SHOW ALL if there are NO potential filter words (genuine "show all" request)
     if any(word in q_lower for word in ['all', 'everything']) and \
@@ -984,14 +995,22 @@ def create_schema_graph(schema: Dict, db_path: str):
     edge_y = []
     edge_labels = []
     
-    for (from_table, to_table, from_col, to_col) in fk_relationships:
-        if from_table in tables and to_table in tables:
-            from_idx = tables.index(from_table)
-            to_idx = tables.index(to_table)
+    # fk_relationships is a dict: {table_name: [{'from_column': ..., 'to_table': ..., 'to_column': ...}]}
+    for from_table, fk_list in fk_relationships.items():
+        if from_table not in tables:
+            continue
+        for fk in fk_list:
+            to_table = fk.get('to_table')
+            from_col = fk.get('from_column')
+            to_col = fk.get('to_column')
             
-            edge_x.extend([node_x[from_idx], node_x[to_idx], None])
-            edge_y.extend([node_y[from_idx], node_y[to_idx], None])
-            edge_labels.append(f"{from_col} → {to_col}")
+            if to_table and to_table in tables:
+                from_idx = tables.index(from_table)
+                to_idx = tables.index(to_table)
+                
+                edge_x.extend([node_x[from_idx], node_x[to_idx], None])
+                edge_y.extend([node_y[from_idx], node_y[to_idx], None])
+                edge_labels.append(f"{from_col} → {to_col}")
     
     # Create figure
     fig = go.Figure()
@@ -1043,8 +1062,13 @@ def create_schema_graph(schema: Dict, db_path: str):
     # Show relationship details
     if fk_relationships:
         with st.expander("🔗 Relationship Details"):
-            for (from_table, to_table, from_col, to_col) in fk_relationships:
-                st.caption(f"• `{from_table}.{from_col}` → `{to_table}.{to_col}`")
+            for from_table, fk_list in fk_relationships.items():
+                for fk in fk_list:
+                    to_table = fk.get('to_table')
+                    from_col = fk.get('from_column')
+                    to_col = fk.get('to_column')
+                    if to_table:
+                        st.caption(f"• `{from_table}.{from_col}` → `{to_table}.{to_col}`")
 
 def create_visualizations(df: pd.DataFrame):
     numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
