@@ -261,6 +261,41 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
                     return f"SELECT {quoted_col}, COUNT(*) as count FROM {quoted_table} GROUP BY {quoted_col}"
         return f"SELECT COUNT(*) as total FROM {quoted_table}"
     
+    # SUM queries (total, revenue, sum)
+    sum_keywords = ['total', 'revenue', 'sum', 'combined']
+    if any(keyword in q_lower for keyword in sum_keywords) and \
+       not any(word in q_lower for word in ['where', 'above', 'below', 'count', 'average']):
+        # Find which numeric column to sum
+        sum_col = None
+        
+        # Look for explicit column mentions
+        for col in columns:
+            col_lower = col.lower()
+            # Check if column name appears in question or is a likely numeric field
+            if col_lower in q_lower or \
+               any(keyword in col_lower for keyword in ['amount', 'total', 'price', 'cost', 'revenue', 'value', 'quantity', 'sales']):
+                # Verify it's a numeric column from enhanced schema if available
+                if db_path:
+                    try:
+                        enhanced_schema = extract_enhanced_schema(db_path)
+                        if table_name in enhanced_schema:
+                            col_info = enhanced_schema[table_name].get('columns', {}).get(col, {})
+                            col_type = col_info.get('type', '').lower()
+                            if col_type in ['integer', 'real', 'numeric', 'decimal', 'float']:
+                                sum_col = col
+                                break
+                    except:
+                        pass
+                # Fallback: assume columns with numeric names are numeric
+                if any(keyword in col_lower for keyword in ['amount', 'total', 'price', 'cost', 'revenue', 'value', 'sales']):
+                    sum_col = col
+                    break
+        
+        # If found a column to sum, generate SQL
+        if sum_col:
+            quoted_col = quote_identifier(sum_col)
+            return f"SELECT SUM({quoted_col}) as total_{sum_col} FROM {quoted_table}"
+    
     # PRIORITY 2: FILTER queries with WHERE conditions
     for col in columns:
         if col in q_lower:
@@ -361,6 +396,9 @@ def repair_sql(sql: str, table_name: str, columns: List[str]) -> str:
     
     quoted_table = quote_identifier(table_name)
     
+    print(f"[SQL REPAIR] INPUT SQL: {sql}")
+    print(f"[SQL REPAIR] Table: {table_name}, Columns: {columns}")
+    
     # Remove artifacts
     sql = sql.strip()
     for artifact in ['|', 'table:', 'Table:', 'CREATE TABLE', 'col =']:
@@ -381,11 +419,38 @@ def repair_sql(sql: str, table_name: str, columns: List[str]) -> str:
            not any(re.search(rf'JOIN\s+{re.escape(col)}\b', sql, re.IGNORECASE) for col in columns if col.lower() != 'table'):
             sql = re.sub(r'\bJOIN\s+table\b', f'JOIN {quoted_table}', sql, flags=re.IGNORECASE)
     
-    # Only replace unquoted table name
-    if f'FROM {table_name}' in sql and f'FROM "{table_name}"' not in sql:
-        sql = sql.replace(f'FROM {table_name}', f'FROM {quoted_table}')
+    # Replace unquoted table name (handle exact and case variations)
+    # This catches: FROM orders, FROM Orders, FROM Order, etc.
+    table_variations = [table_name, table_name.capitalize(), table_name.upper(), table_name.lower()]
+    
+    # Also handle singular/plural variations for common cases
+    if table_name.endswith('s'):
+        # Add singular form: orders → order
+        singular = table_name[:-1]
+        table_variations.extend([singular, singular.capitalize(), singular.upper()])
+    else:
+        # Add plural form: order → orders
+        plural = table_name + 's'
+        table_variations.extend([plural, plural.capitalize(), plural.upper()])
+    
+    # Remove duplicates
+    table_variations = list(set(table_variations))
+    
+    for variation in table_variations:
+        # Use word boundaries to avoid partial matches
+        pattern = rf'\bFROM\s+{re.escape(variation)}\b'
+        if re.search(pattern, sql, re.IGNORECASE) and f'FROM "{variation}"' not in sql:
+            sql = re.sub(pattern, f'FROM {quoted_table}', sql, flags=re.IGNORECASE)
+        
+        # Also handle JOIN cases
+        pattern = rf'\bJOIN\s+{re.escape(variation)}\b'
+        if re.search(pattern, sql, re.IGNORECASE) and f'JOIN "{variation}"' not in sql:
+            sql = re.sub(pattern, f'JOIN {quoted_table}', sql, flags=re.IGNORECASE)
+    
+    print(f"[SQL REPAIR] After table placeholder fix: {sql}")
     
     # Quote column names ONLY if they're not already quoted
+    # IMPORTANT: Only quote columns in appropriate SQL contexts (after SELECT, in WHERE with operators)
     for col in columns:
         quoted_col = quote_identifier(col)
         
@@ -393,16 +458,22 @@ def repair_sql(sql: str, table_name: str, columns: List[str]) -> str:
         if quoted_col in sql or f'"{col}"' in sql:
             continue
         
-        # Match bare (unquoted) column names in various SQL contexts
-        # Use negative lookbehind/lookahead to avoid matching quoted identifiers
+        # Match bare (unquoted) column names in specific SQL contexts ONLY
+        # Be more conservative to avoid false matches
         patterns = [
-            # SELECT column, WHERE column, etc. (not preceded/followed by quotes)
-            (rf'(?<!["\w])({re.escape(col)})(?=\s*[,\s=<>)])', quoted_col),
-            (rf'(?<!["\w])({re.escape(col)})(?=\s+FROM)', quoted_col),
-            (rf'(?<!["\w])({re.escape(col)})$', quoted_col),
+            # In aggregate functions: SUM(col), AVG(col), etc.
+            (rf'\b(SUM|AVG|COUNT|MAX|MIN)\s*\(\s*({re.escape(col)})\s*\)', rf'\1({quoted_col})'),
+            # After SELECT with comma: SELECT col,
+            (rf'\bSELECT\s+({re.escape(col)})(?=\s*,)', f'SELECT {quoted_col}'),
+            # In WHERE with operators: WHERE col =, col >, etc.
+            (rf'\bWHERE\s+({re.escape(col)})(?=\s*[=<>!])', f'WHERE {quoted_col}'),
+            (rf'\bAND\s+({re.escape(col)})(?=\s*[=<>!])', f'AND {quoted_col}'),
+            (rf'\bOR\s+({re.escape(col)})(?=\s*[=<>!])', f'OR {quoted_col}'),
         ]
         for pattern, replacement in patterns:
             sql = re.sub(pattern, replacement, sql, flags=re.IGNORECASE)
+    
+    print(f"[SQL REPAIR] After column quoting: {sql}")
     
     # Column whitelist check: Remove hallucinated columns
     # Extract columns mentioned in SQL (between SELECT and FROM)
@@ -452,14 +523,47 @@ def generate_sql(question: str, schema_str: str, tokenizer, model, db_path: str 
         return "SELECT 1"
     
     # Detect which tables are mentioned in the question
+    # Use smart matching: check full name, base name (without "sample_" prefix), singular/plural
     q_lower = question.lower()
-    mentioned_tables = [t for t in table_names if t.lower() in q_lower]
+    mentioned_tables = []
+    
+    for t in table_names:
+        t_lower = t.lower()
+        # Check full table name
+        if t_lower in q_lower:
+            mentioned_tables.append(t)
+            continue
+        
+        # Check base name (remove common prefixes like "sample_", "tbl_", etc.)
+        base_name = t_lower
+        for prefix in ['sample_', 'tbl_', 'tb_']:
+            if base_name.startswith(prefix):
+                base_name = base_name[len(prefix):]
+                break
+        
+        # Check if base name is in question
+        if base_name in q_lower:
+            mentioned_tables.append(t)
+            continue
+        
+        # Check singular/plural variations
+        if base_name.endswith('s'):
+            singular = base_name[:-1]
+            if singular in q_lower:
+                mentioned_tables.append(t)
+        else:
+            plural = base_name + 's'
+            if plural in q_lower:
+                mentioned_tables.append(t)
     
     # Use mentioned table or fall back to first table
     if mentioned_tables:
         table_name = mentioned_tables[0]
+        print(f"[TABLE DETECTION] Found table '{table_name}' in question: '{question}'")
     else:
         table_name = table_names[0]
+        print(f"[TABLE DETECTION] No table match, using first table '{table_name}' for question: '{question}'")
+    
     columns = all_columns.get(table_name, [])
     quoted_table = quote_identifier(table_name)
     
@@ -543,8 +647,14 @@ A: SELECT * FROM {quoted_table}
 Q: Count by {example_column}
 A: SELECT {example_column_quoted}, COUNT(*) FROM {quoted_table} GROUP BY {example_column_quoted}
 
+Q: Total {numeric_col if numeric_col else example_column}
+A: SELECT SUM({numeric_col_quoted}) FROM {quoted_table}
+
 Q: Where {numeric_col if numeric_col else example_column} above 90
 A: SELECT * FROM {quoted_table} WHERE {numeric_col_quoted} > 90
+
+IMPORTANT: Use correct SQL syntax with parentheses for aggregations: SUM(column), AVG(column), COUNT(*).
+Do NOT add WHERE clauses unless the question explicitly requests filtering.
 
 Question: {question}
 SQL:"""
