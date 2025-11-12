@@ -219,8 +219,43 @@ Preferred communication style: Simple, everyday language.
 - **Logout Functionality**: Secure logout that clears session
 - **SQL Privacy Maintained**: Generated SQL stored server-side but never shown to users
 
+## Recent Feature Additions (November 12, 2025)
+
+### Multi-Table JOIN Support (COMPLETED ✅)
+- **FK-Driven Detection**: Three-tier detection using explicit mentions, FK + column references, and intent keywords
+- **JOIN Template Generation**: `get_join_template_sql()` creates bidirectional FK-based JOINs for 2-3 table queries
+- **AI Prompt Enhancement**: Multi-table schema with FK relationships and dynamic JOIN examples
+- **Multi-Table Aware SQL Repair**: `repair_sql()` updated with `all_columns` dict and `is_multi_table` flag
+  - Preserves JOIN structure by skipping aggressive validation for JOIN queries
+  - Maintains single-table safety with column whitelist validation
+- **Architecture Decision**: Template-based for simple JOINs, AI handles complex cases with proper validation
+
+### SQL→English Query Explanation (COMPLETED ✅)
+- **Function**: `explain_sql_query()` converts SQL operations to plain English descriptions
+- **What It Detects**:
+  - Aggregations (COUNT, AVG, SUM, MAX, MIN)
+  - Multi-table JOINs with involved tables
+  - Filtering conditions (WHERE clauses)
+  - Grouping and sorting operations
+  - LIMIT constraints
+- **Privacy Maintained**: Never exposes SQL code, only operation descriptions
+- **UI Integration**: Displayed before query results in "🔍 What This Query Does" section
+- **Example**: "This query combines data from 2 related tables: orders, customers. It counts the number of matching records. Results are filtered based on your specified conditions."
+
+### Visual Schema Graph (COMPLETED ✅)
+- **Interactive Network Graph**: Plotly-based visualization showing database structure
+- **Nodes**: Tables positioned in circular layout with hover details (columns, counts)
+- **Edges**: Foreign key relationships with directional arrows
+- **Features**:
+  - Automatic FK detection using `detect_foreign_keys()`
+  - Interactive hover showing table columns (first 10)
+  - Relationship details in expandable section
+  - Responsive sizing based on table count
+- **UI Integration**: Sidebar "Database Schema" section, shown only for multi-table databases
+- **Visual Design**: Blue nodes with white borders, gray relationship edges, transparent background
+
 ## Future Architectural Considerations
-- **Multi-Table JOIN Enhancement**: Planned improvements to SQL generation for cross-table queries
-- **FK-Aware Query Generation**: Leverage detected foreign key relationships for automatic JOIN construction
 - **Advanced Chat Features**: Chat deletion, renaming, search across chat history
 - **Model Training**: Spider dataset integration for fine-tuning SQL generation
+- **Enhanced JOIN Support**: Hub-and-spoke join patterns, complex multi-table aggregations
+- **Query Optimization**: Caching frequently used queries, query plan analysis
