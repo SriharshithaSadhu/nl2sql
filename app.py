@@ -252,8 +252,10 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
                 quoted_col = quote_identifier(col)
                 return f"SELECT AVG({quoted_col}) as average_{col} FROM {quoted_table}"
     
-    # COUNT queries
-    if 'count' in q_lower and not any(word in q_lower for word in ['where', 'above', 'below']):
+    # COUNT queries (count, how many, number of)
+    count_keywords = ['count', 'how many', 'number of', 'total number']
+    if any(keyword in q_lower for keyword in count_keywords) and \
+       not any(word in q_lower for word in ['where', 'above', 'below', 'average', 'sum', 'total revenue', 'total price']):
         if 'by' in q_lower or 'group' in q_lower:
             for col in columns:
                 if col in q_lower:

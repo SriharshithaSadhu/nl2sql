@@ -184,14 +184,22 @@ Preferred communication style: Simple, everyday language.
 - **Multi-table schema in prompts**: AI receives information about all available tables and their relationships
 - **Limitation**: Full cross-table JOIN queries currently limited to single-table context in SQL repair pipeline
 
-### Testing & Validation
-- Comprehensive end-to-end testing completed with Playwright
+### Testing & Validation (November 12, 2025)
+- **Comprehensive 50+ question test suite** completed with multi-table upload
 - Verified SQL privacy across all user interactions
 - Confirmed template and AI-based query generation working correctly  
-- Fixed all "syntax error near table" issues - AI now generates valid SQL
-- Tested multi-table upload functionality
-- Verified upload history and chat history features
+- Fixed all "syntax error near table/Order" issues - AI now generates valid SQL
+- Tested multi-table upload functionality with 4 related tables
+- Verified all aggregation types (SUM, AVG, COUNT, MAX, MIN) working correctly
 - Architect-approved implementation meeting all requirements
+
+### Bug Fixes from Comprehensive Testing (November 12, 2025)
+1. **Table Name Syntax Errors**: Fixed "syntax error near 'Order'" by adding table name variation handling (singular/plural, case variations) with proper quoting
+2. **Table Detection**: Enhanced to remove prefixes ("sample_") and match singular/plural forms ("order" → "sample_orders")
+3. **SUM/Revenue Queries**: Added dedicated SUM template for "total", "revenue", "sum" keywords with automatic numeric column detection
+4. **"How Many" Queries**: Extended COUNT template to handle "how many", "number of", "total number" phrasings
+5. **AI Prompt Quality**: Added SUM few-shot example and explicit syntax instructions to prevent malformed SQL
+6. **SQL Repair Robustness**: Improved column quoting to be more conservative and avoid false matches
 
 ## Future Architectural Considerations
 The `attached_assets` folder references a planned multi-tier architecture with:
