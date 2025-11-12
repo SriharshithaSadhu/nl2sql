@@ -177,6 +177,91 @@ def format_schema_for_model(schema: Dict[str, List[str]]) -> str:
     schema_str = '\n'.join(schema_lines)
     return schema_str
 
+def get_join_template_sql(question: str, related_tables: List[str], all_columns: Dict, foreign_keys: Dict, db_path: str = None) -> Optional[str]:
+    """Generate JOIN SQL based on FK relationships (Stage 2: FK-driven JOIN templates)"""
+    if len(related_tables) < 2:
+        return None
+    
+    q_lower = question.lower()
+    primary_table = related_tables[0]
+    
+    # Find FK relationship between tables
+    join_clauses = []
+    tables_in_join = [primary_table]
+    
+    for i in range(len(related_tables) - 1):
+        current_table = related_tables[i]
+        next_table = related_tables[i + 1]
+        
+        # Look for FK from current_table to next_table
+        join_found = False
+        if current_table in foreign_keys:
+            for fk in foreign_keys[current_table]:
+                if fk['to_table'] == next_table:
+                    from_col = quote_identifier(fk['from_column'])
+                    to_col = quote_identifier(fk.get('to_column', 'id'))
+                    join_clauses.append(
+                        f"JOIN {quote_identifier(next_table)} ON {quote_identifier(current_table)}.{from_col} = {quote_identifier(next_table)}.{to_col}"
+                    )
+                    tables_in_join.append(next_table)
+                    join_found = True
+                    break
+        
+        # Try reverse: FK from next_table to current_table
+        if not join_found and next_table in foreign_keys:
+            for fk in foreign_keys[next_table]:
+                if fk['to_table'] == current_table:
+                    from_col = quote_identifier(fk['from_column'])
+                    to_col = quote_identifier(fk.get('to_column', 'id'))
+                    join_clauses.append(
+                        f"JOIN {quote_identifier(next_table)} ON {quote_identifier(next_table)}.{from_col} = {quote_identifier(current_table)}.{to_col}"
+                    )
+                    tables_in_join.append(next_table)
+                    join_found = True
+                    break
+        
+        if not join_found:
+            print(f"[JOIN TEMPLATE] No FK relationship found between {current_table} and {next_table}")
+            return None
+    
+    # Build SELECT clause - prefer * for simplicity, but can be enhanced
+    select_clause = "*"
+    
+    # Check for aggregation keywords
+    if any(kw in q_lower for kw in ['count', 'how many', 'number of', 'total number']):
+        # COUNT query with JOIN
+        group_by_col = None
+        # Look for columns from related tables
+        for table in tables_in_join:
+            table_cols = all_columns.get(table, [])
+            for col in table_cols:
+                if col.lower() in q_lower:
+                    group_by_col = f"{quote_identifier(table)}.{quote_identifier(col)}"
+                    break
+            if group_by_col:
+                break
+        
+        if group_by_col:
+            select_clause = f"{group_by_col}, COUNT(*) as count"
+            join_sql = f"SELECT {select_clause} FROM {quote_identifier(primary_table)} {' '.join(join_clauses)} GROUP BY {group_by_col}"
+            return join_sql
+        else:
+            # Simple count with JOIN
+            join_sql = f"SELECT COUNT(*) as total FROM {quote_identifier(primary_table)} {' '.join(join_clauses)}"
+            return join_sql
+    
+    # Default: SELECT * with JOIN
+    join_sql = f"SELECT * FROM {quote_identifier(primary_table)} {' '.join(join_clauses)}"
+    
+    # Add WHERE clause if filtering mentioned
+    if any(kw in q_lower for kw in ['where', 'greater than', 'less than', 'above', 'below', '>']):
+        # Let AI handle complex filtering
+        return None
+    
+    print(f"[JOIN TEMPLATE] Generated: {join_sql}")
+    return join_sql
+
+
 def get_template_sql(question: str, table_name: str, columns: List[str], db_path: str = None) -> Optional[str]:
     """Generate SQL from templates for common query patterns with value-aware matching"""
     q_lower = question.lower()
@@ -393,103 +478,60 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
     # Return None to fall back to AI for unmatched filter queries
     return None
 
-def repair_sql(sql: str, table_name: str, columns: List[str]) -> str:
-    """Intelligently repair and validate AI-generated SQL"""
+# Removed - duplicate function replaced with multi-table aware version below
+
+def repair_sql(sql: str, table_name: str, columns: List[str], all_columns: Dict = None, is_multi_table: bool = False) -> str:
+    """Multi-table aware SQL repair and validation"""
     import re
     
     quoted_table = quote_identifier(table_name)
     
     print(f"[SQL REPAIR] INPUT SQL: {sql}")
-    print(f"[SQL REPAIR] Table: {table_name}, Columns: {columns}")
+    print(f"[SQL REPAIR] Table: {table_name}, Columns: {columns}, Multi-table: {is_multi_table}")
     
-    # Remove artifacts
+    # Build comprehensive column registry
+    valid_columns_lower = set([c.lower() for c in columns])
+    valid_tables_lower = set([table_name.lower()])
+    
+    if is_multi_table and all_columns:
+        for tbl, cols in all_columns.items():
+            valid_tables_lower.add(tbl.lower())
+            for col in cols:
+                valid_columns_lower.add(col.lower())
+    
+    # Clean artifacts
     sql = sql.strip()
-    for artifact in ['|', 'table:', 'Table:', 'CREATE TABLE', 'col =']:
-        if artifact in sql:
+    for artifact in ['A:', 'SQL:', '|', 'table:', 'Table:', 'CREATE TABLE', 'col =']:
+        if sql.startswith(artifact):
+            sql = sql[len(artifact):].strip()
+        if artifact in sql and artifact not in ['|', 'A:', 'SQL:']:
             sql = sql.split(artifact)[0].strip()
     
-    # Fix table placeholder using word-boundary regex (case-insensitive)
-    # Only replace "table" when it's actually a placeholder (not a legitimate table name)
-    # Be careful with JOIN - only replace if it's really a placeholder
+    # Fix table placeholders
     sql = re.sub(r'\bFROM\s+table\b', f'FROM {quoted_table}', sql, flags=re.IGNORECASE)
     
-    # For JOIN, only replace if there's no other table name nearby
-    # This prevents breaking legitimate multi-table JOINs
-    if 'JOIN' in sql.upper():
-        # Check if there are actual table references (quoted or known table names)
-        # If not, it's likely a placeholder
-        if not re.search(r'JOIN\s+"[^"]+"', sql, re.IGNORECASE) and \
-           not any(re.search(rf'JOIN\s+{re.escape(col)}\b', sql, re.IGNORECASE) for col in columns if col.lower() != 'table'):
-            sql = re.sub(r'\bJOIN\s+table\b', f'JOIN {quoted_table}', sql, flags=re.IGNORECASE)
-    
-    # Replace unquoted table name (handle exact and case variations)
-    # This catches: FROM orders, FROM Orders, FROM Order, etc.
-    table_variations = [table_name, table_name.capitalize(), table_name.upper(), table_name.lower()]
-    
-    # Also handle singular/plural variations for common cases
-    if table_name.endswith('s'):
-        # Add singular form: orders → order
-        singular = table_name[:-1]
-        table_variations.extend([singular, singular.capitalize(), singular.upper()])
-    else:
-        # Add plural form: order → orders
-        plural = table_name + 's'
-        table_variations.extend([plural, plural.capitalize(), plural.upper()])
-    
-    # Remove duplicates
-    table_variations = list(set(table_variations))
-    
-    for variation in table_variations:
-        # Use word boundaries to avoid partial matches
-        pattern = rf'\bFROM\s+{re.escape(variation)}\b'
-        if re.search(pattern, sql, re.IGNORECASE) and f'FROM "{variation}"' not in sql:
-            sql = re.sub(pattern, f'FROM {quoted_table}', sql, flags=re.IGNORECASE)
-        
-        # Also handle JOIN cases
-        pattern = rf'\bJOIN\s+{re.escape(variation)}\b'
-        if re.search(pattern, sql, re.IGNORECASE) and f'JOIN "{variation}"' not in sql:
-            sql = re.sub(pattern, f'JOIN {quoted_table}', sql, flags=re.IGNORECASE)
-    
-    print(f"[SQL REPAIR] After table placeholder fix: {sql}")
-    
-    # Quote column names ONLY if they're not already quoted
-    # IMPORTANT: Only quote columns in appropriate SQL contexts (after SELECT, in WHERE with operators)
-    for col in columns:
-        quoted_col = quote_identifier(col)
-        
-        # Skip if column is already quoted in SQL
-        if quoted_col in sql or f'"{col}"' in sql:
-            continue
-        
-        # Match bare (unquoted) column names in specific SQL contexts ONLY
-        # Be more conservative to avoid false matches
-        patterns = [
-            # In aggregate functions: SUM(col), AVG(col), etc.
-            (rf'\b(SUM|AVG|COUNT|MAX|MIN)\s*\(\s*({re.escape(col)})\s*\)', rf'\1({quoted_col})'),
-            # After SELECT with comma: SELECT col,
-            (rf'\bSELECT\s+({re.escape(col)})(?=\s*,)', f'SELECT {quoted_col}'),
-            # In WHERE with operators: WHERE col =, col >, etc.
-            (rf'\bWHERE\s+({re.escape(col)})(?=\s*[=<>!])', f'WHERE {quoted_col}'),
-            (rf'\bAND\s+({re.escape(col)})(?=\s*[=<>!])', f'AND {quoted_col}'),
-            (rf'\bOR\s+({re.escape(col)})(?=\s*[=<>!])', f'OR {quoted_col}'),
-        ]
-        for pattern, replacement in patterns:
-            sql = re.sub(pattern, replacement, sql, flags=re.IGNORECASE)
-    
-    print(f"[SQL REPAIR] After column quoting: {sql}")
-    
-    # Column whitelist check: Remove hallucinated columns
-    # Extract columns mentioned in SQL (between SELECT and FROM)
+    # Column whitelist check: Multi-table aware validation
     select_match = re.search(r'SELECT\s+(.*?)\s+FROM', sql, re.IGNORECASE | re.DOTALL)
     if select_match and select_match.group(1).strip() not in ['*', 'COUNT(*)', 'COUNT(*)']:
         select_clause = select_match.group(1)
-        # Check if any column in SELECT is not in the actual column list
+        
+        # Check if it's a JOIN query
+        has_join = bool(re.search(r'\bJOIN\b', sql, re.IGNORECASE))
+        
+        # For JOIN queries, skip aggressive validation (preserve structure)
+        if has_join:
+            print(f"[SQL REPAIR] JOIN detected - preserving multi-table structure")
+            print(f"[SQL REPAIR] Final SQL: {sql}")
+            return sql
+        
+        # Single-table validation
         contains_invalid = False
         for word in re.findall(r'\b\w+\b', select_clause):
-            if word.upper() not in ['SELECT', 'FROM', 'WHERE', 'COUNT', 'AVG', 'SUM', 'MAX', 'MIN', 'AS', 'DISTINCT']:
-                # Check if it's a known column (case-insensitive)
-                if word.lower() not in [c.lower() for c in columns]:
+            if word.upper() not in ['SELECT', 'FROM', 'WHERE', 'COUNT', 'AVG', 'SUM', 'MAX', 'MIN', 'AS', 'DISTINCT', 'BY', 'GROUP']:
+                # Check if it's a known column or table (case-insensitive)
+                if word.lower() not in valid_columns_lower and word.lower() not in valid_tables_lower:
                     contains_invalid = True
+                    print(f"[SQL REPAIR] Unknown column: {word}")
                     break
         
         # If SQL contains invalid columns, fall back to SELECT *
@@ -559,10 +601,56 @@ def generate_sql(question: str, schema_str: str, tokenizer, model, db_path: str 
             if plural in q_lower:
                 mentioned_tables.append(t)
     
-    # Use mentioned table or fall back to first table
+    # Enhanced multi-table detection with FK-driven logic
+    # Get foreign keys for analysis
+    foreign_keys = {}
+    if db_path:
+        try:
+            foreign_keys = detect_foreign_keys(db_path)
+        except:
+            pass
+    
+    # Stage 1: FK-aware multi-table detection
+    is_multi_table_query = False
+    related_tables = []
+    
+    # Check 1: Multiple tables explicitly mentioned
+    if len(mentioned_tables) > 1:
+        is_multi_table_query = True
+        related_tables = mentioned_tables[:3]  # Limit to 3 tables max
+        print(f"[MULTI-TABLE] Multiple tables mentioned: {related_tables}")
+    
+    # Check 2: FK relationships detected in question
+    elif len(mentioned_tables) == 1 and foreign_keys:
+        primary_table = mentioned_tables[0]
+        if primary_table in foreign_keys:
+            # Look for related table mentions via FK
+            for fk in foreign_keys[primary_table]:
+                related_table = fk['to_table']
+                if related_table in table_names:
+                    # Check if related table or its columns mentioned
+                    related_cols = all_columns.get(related_table, [])
+                    if any(col.lower() in q_lower for col in related_cols):
+                        is_multi_table_query = True
+                        related_tables = [primary_table, related_table]
+                        print(f"[MULTI-TABLE] FK relationship detected: {primary_table} → {related_table}")
+                        break
+    
+    # Check 3: User intent keywords (with FK confirmation)
+    if not is_multi_table_query and len(mentioned_tables) == 1:
+        intent_keywords = ['with', 'including', 'from both', 'together', 'combined']
+        if any(keyword in q_lower for keyword in intent_keywords) and foreign_keys:
+            # Only flag as multi-table if FKs exist
+            primary_table = mentioned_tables[0] if mentioned_tables else table_names[0]
+            if primary_table in foreign_keys and foreign_keys[primary_table]:
+                is_multi_table_query = True
+                related_tables = [primary_table, foreign_keys[primary_table][0]['to_table']]
+                print(f"[MULTI-TABLE] Intent keywords with FK: {related_tables}")
+    
+    # Use primary table
     if mentioned_tables:
         table_name = mentioned_tables[0]
-        print(f"[TABLE DETECTION] Found table '{table_name}' in question: '{question}'")
+        print(f"[TABLE DETECTION] Primary table '{table_name}' in question: '{question}'")
     else:
         table_name = table_names[0]
         print(f"[TABLE DETECTION] No table match, using first table '{table_name}' for question: '{question}'")
@@ -570,14 +658,25 @@ def generate_sql(question: str, schema_str: str, tokenizer, model, db_path: str 
     columns = all_columns.get(table_name, [])
     quoted_table = quote_identifier(table_name)
     
-    # Fast-path: Try templates for common queries (with value-aware matching)
-    template_sql = get_template_sql(question, table_name, columns, db_path)
-    if template_sql:
-        print(f"[TEMPLATE FAST-PATH] {question}")
-        return template_sql
+    # Fast-path: Try templates
+    if is_multi_table_query and related_tables:
+        # Try JOIN template for multi-table queries
+        join_template_sql = get_join_template_sql(question, related_tables, all_columns, foreign_keys, db_path)
+        if join_template_sql:
+            print(f"[JOIN TEMPLATE FAST-PATH] {question}")
+            return join_template_sql
+    elif not is_multi_table_query:
+        # Single-table templates
+        template_sql = get_template_sql(question, table_name, columns, db_path)
+        if template_sql:
+            print(f"[TEMPLATE FAST-PATH] {question}")
+            return template_sql
     
-    # AI-first approach with enhanced prompting
-    print(f"[AI-FIRST DYNAMIC] {question}")
+    # AI-first approach with enhanced prompting (handles both single and multi-table)
+    if is_multi_table_query:
+        print(f"[AI-FIRST MULTI-TABLE] {question}")
+    else:
+        print(f"[AI-FIRST DYNAMIC] {question}")
     
     # Get enhanced schema with sample values and foreign keys if available
     enhanced_schema = {}
@@ -619,24 +718,33 @@ def generate_sql(question: str, schema_str: str, tokenizer, model, db_path: str 
         numeric_col = columns[1]  # Fallback to second column
     numeric_col_quoted = quote_identifier(numeric_col) if numeric_col else example_column_quoted
     
-    # Build multi-table schema info if available
+    # Build multi-table schema info with relationships
     all_tables_schema = ""
+    join_examples = ""
+    
     if len(table_names) > 1:
         all_tables_schema = "\n\nAvailable Tables:\n"
         for tbl in table_names:
             tbl_cols = all_columns.get(tbl, [])
             all_tables_schema += f"- {quote_identifier(tbl)}: {', '.join([quote_identifier(c) for c in tbl_cols])}\n"
         
-        # Add FK relationships if detected
-        if foreign_keys and table_name in foreign_keys and foreign_keys[table_name]:
-            all_tables_schema += f"\nRelationships for {quoted_table}:\n"
-            for fk in foreign_keys[table_name]:
-                from_col = quote_identifier(fk['from_column'])
-                to_table = quote_identifier(fk['to_table'])
-                to_col = quote_identifier(fk.get('to_column', 'id'))
-                all_tables_schema += f"- {from_col} → {to_table}.{to_col}\n"
+        # Add FK relationships with JOIN examples
+        if foreign_keys:
+            all_tables_schema += "\nTable Relationships:\n"
+            for tbl, fk_list in foreign_keys.items():
+                if fk_list:
+                    for fk in fk_list:
+                        from_col = quote_identifier(fk['from_column'])
+                        to_table = quote_identifier(fk['to_table'])
+                        to_col = quote_identifier(fk.get('to_column', 'id'))
+                        all_tables_schema += f"- {quote_identifier(tbl)}.{from_col} → {to_table}.{to_col}\n"
+                        
+                        # Build JOIN example using actual FK
+                        if tbl == table_name or (related_tables and tbl in related_tables):
+                            join_examples += f"\nQ: Show {tbl} with {to_table} details\n"
+                            join_examples += f"A: SELECT * FROM {quote_identifier(tbl)} JOIN {to_table} ON {quote_identifier(tbl)}.{from_col} = {to_table}.{to_col}\n"
     
-    # Few-shot prompt with ACTUAL schema-based examples
+    # Few-shot prompt with ACTUAL schema-based examples (including JOINs)
     prompt = f"""Generate SQLite query using the exact table and column names provided.
 
 IMPORTANT: Use table and column names EXACTLY as listed below. Never use the word "table" as a placeholder.
@@ -654,10 +762,11 @@ Q: Total {numeric_col if numeric_col else example_column}
 A: SELECT SUM({numeric_col_quoted}) FROM {quoted_table}
 
 Q: Where {numeric_col if numeric_col else example_column} above 90
-A: SELECT * FROM {quoted_table} WHERE {numeric_col_quoted} > 90
+A: SELECT * FROM {quoted_table} WHERE {numeric_col_quoted} > 90{join_examples}
 
 IMPORTANT: Use correct SQL syntax with parentheses for aggregations: SUM(column), AVG(column), COUNT(*).
 Do NOT add WHERE clauses unless the question explicitly requests filtering.
+For JOIN queries, use the relationships listed above to connect tables properly.
 
 Question: {question}
 SQL:"""
@@ -679,7 +788,7 @@ SQL:"""
     sql = tokenizer.decode(outputs[0], skip_special_tokens=True)
     
     # Repair and validate the generated SQL
-    sql = repair_sql(sql, table_name, columns)
+    sql = repair_sql(sql, table_name, columns, all_columns, is_multi_table_query)
     
     print(f"[GENERATED] {sql}")
     return sql
