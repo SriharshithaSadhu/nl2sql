@@ -1168,7 +1168,7 @@ def main():
                         st.session_state.current_chat_id, 
                         "assistant", 
                         f"Error: {error}",
-                        sql_query=None,
+                        sql_query=sql,
                         rows_returned=0,
                         success=False
                     )
@@ -1219,7 +1219,7 @@ def main():
                         st.session_state.current_chat_id,
                         "assistant",
                         summary if not df.empty else "Query executed successfully",
-                        sql_query=sql_query,
+                        sql_query=sql,
                         rows_returned=len(df),
                         success=True
                     )
