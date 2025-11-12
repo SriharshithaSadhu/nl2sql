@@ -793,6 +793,74 @@ SQL:"""
     print(f"[GENERATED] {sql}")
     return sql
 
+def explain_sql_query(sql: str, question: str, schema: Dict) -> str:
+    """Convert SQL query to plain English explanation without revealing SQL code"""
+    import re
+    
+    sql_upper = sql.upper()
+    explanation_parts = []
+    
+    # Extract table names from schema
+    table_names = list(schema.keys())
+    
+    # Detect aggregations
+    has_count = 'COUNT(' in sql_upper
+    has_avg = 'AVG(' in sql_upper or 'AVERAGE' in sql_upper
+    has_sum = 'SUM(' in sql_upper
+    has_max = 'MAX(' in sql_upper
+    has_min = 'MIN(' in sql_upper
+    
+    # Detect JOINs
+    has_join = 'JOIN' in sql_upper
+    
+    # Detect filtering
+    has_where = 'WHERE' in sql_upper
+    has_group_by = 'GROUP BY' in sql_upper
+    has_order_by = 'ORDER BY' in sql_upper
+    has_limit = 'LIMIT' in sql_upper
+    
+    # Build explanation
+    if has_join:
+        # Multi-table query
+        involved_tables = [t for t in table_names if t.lower() in sql.lower()]
+        if len(involved_tables) >= 2:
+            explanation_parts.append(f"This query combines data from {len(involved_tables)} related tables: {', '.join(involved_tables)}.")
+    
+    if has_count:
+        explanation_parts.append("It counts the number of matching records.")
+    elif has_avg:
+        explanation_parts.append("It calculates the average value.")
+    elif has_sum:
+        explanation_parts.append("It calculates the total sum.")
+    elif has_max:
+        explanation_parts.append("It finds the maximum value.")
+    elif has_min:
+        explanation_parts.append("It finds the minimum value.")
+    else:
+        explanation_parts.append("It retrieves the matching records.")
+    
+    if has_where:
+        explanation_parts.append("Results are filtered based on your specified conditions.")
+    
+    if has_group_by:
+        explanation_parts.append("Data is grouped and aggregated by categories.")
+    
+    if has_order_by:
+        explanation_parts.append("Results are sorted in a specific order.")
+    
+    if has_limit:
+        # Extract limit number
+        limit_match = re.search(r'LIMIT\s+(\d+)', sql_upper)
+        if limit_match:
+            limit_num = limit_match.group(1)
+            explanation_parts.append(f"Only the top {limit_num} results are shown.")
+    
+    # Combine explanation
+    if explanation_parts:
+        return " ".join(explanation_parts)
+    else:
+        return "This query retrieves data from your database based on your question."
+
 def sanitize_error_message(error_msg: str) -> str:
     """Remove SQL query content from error messages to keep queries hidden from users."""
     error_str = str(error_msg)
@@ -865,6 +933,118 @@ def generate_summary(df: pd.DataFrame, question: str, tokenizer, model) -> str:
     
     summary = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return summary
+
+def create_schema_graph(schema: Dict, db_path: str):
+    """Create an interactive graph visualization of database schema with relationships"""
+    import plotly.graph_objects as go
+    
+    # Detect foreign keys
+    fk_relationships = detect_foreign_keys(db_path)
+    
+    if not schema:
+        st.warning("No schema available for visualization")
+        return
+    
+    # Create nodes (tables) and edges (relationships)
+    tables = list(schema.keys())
+    num_tables = len(tables)
+    
+    if num_tables == 0:
+        return
+    
+    # Position tables in a circle
+    import math
+    angle_step = 2 * math.pi / num_tables
+    radius = max(2, num_tables * 0.5)
+    
+    node_x = []
+    node_y = []
+    node_text = []
+    node_hover = []
+    
+    for i, table in enumerate(tables):
+        angle = i * angle_step
+        x = radius * math.cos(angle)
+        y = radius * math.sin(angle)
+        node_x.append(x)
+        node_y.append(y)
+        node_text.append(table)
+        
+        # Hover info with column details
+        columns = schema[table]
+        hover_info = f"<b>{table}</b><br>"
+        hover_info += f"Columns: {len(columns)}<br>"
+        hover_info += "<br>".join(columns[:10])  # Show first 10 columns
+        if len(columns) > 10:
+            hover_info += f"<br>... and {len(columns) - 10} more"
+        node_hover.append(hover_info)
+    
+    # Create edges for relationships
+    edge_x = []
+    edge_y = []
+    edge_labels = []
+    
+    for (from_table, to_table, from_col, to_col) in fk_relationships:
+        if from_table in tables and to_table in tables:
+            from_idx = tables.index(from_table)
+            to_idx = tables.index(to_table)
+            
+            edge_x.extend([node_x[from_idx], node_x[to_idx], None])
+            edge_y.extend([node_y[from_idx], node_y[to_idx], None])
+            edge_labels.append(f"{from_col} → {to_col}")
+    
+    # Create figure
+    fig = go.Figure()
+    
+    # Add edges
+    if edge_x:
+        fig.add_trace(go.Scatter(
+            x=edge_x, y=edge_y,
+            mode='lines',
+            line=dict(width=2, color='#888'),
+            hoverinfo='none',
+            showlegend=False
+        ))
+    
+    # Add nodes
+    fig.add_trace(go.Scatter(
+        x=node_x, y=node_y,
+        mode='markers+text',
+        marker=dict(
+            size=30,
+            color='#1f77b4',
+            line=dict(width=2, color='white')
+        ),
+        text=node_text,
+        textposition="bottom center",
+        hovertext=node_hover,
+        hoverinfo='text',
+        showlegend=False
+    ))
+    
+    # Update layout
+    fig.update_layout(
+        title=dict(
+            text=f"Database Schema: {num_tables} table(s), {len(fk_relationships)} relationship(s)",
+            font=dict(size=16)
+        ),
+        showlegend=False,
+        hovermode='closest',
+        margin=dict(b=20, l=5, r=5, t=40),
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        height=400,
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)'
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Show relationship details
+    if fk_relationships:
+        with st.expander("🔗 Relationship Details"):
+            for (from_table, to_table, from_col, to_col) in fk_relationships:
+                st.caption(f"• `{from_table}.{from_col}` → `{to_table}.{to_col}`")
 
 def create_visualizations(df: pd.DataFrame):
     numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
@@ -1183,6 +1363,13 @@ def main():
         
         if st.session_state.schema:
             st.subheader("📋 Database Schema")
+            
+            # Visual schema graph
+            if len(st.session_state.schema) > 1:
+                with st.expander("🗺️ Visual Schema Graph", expanded=True):
+                    create_schema_graph(st.session_state.schema, st.session_state.db_path)
+            
+            # Table details
             for table_name, columns in st.session_state.schema.items():
                 with st.expander(f"📊 Table: {table_name}"):
                     st.code(f"{table_name}(\n  " + ",\n  ".join(columns) + "\n)")
@@ -1291,6 +1478,11 @@ def main():
                 })
             elif df is not None:
                 st.success(f"✅ Query executed successfully! Found {len(df)} rows.")
+                
+                # Show query explanation (without revealing SQL)
+                explanation = explain_sql_query(sql, question, st.session_state.schema)
+                st.subheader("🔍 What This Query Does")
+                st.info(explanation)
                 
                 st.subheader("📋 Query Results")
                 st.dataframe(df, use_container_width=True)
