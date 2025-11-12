@@ -3,7 +3,11 @@ import pandas as pd
 import sqlite3
 import plotly.express as px
 import plotly.graph_objects as go
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+try:
+    from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+except ImportError:
+    st.error("⚠️ Installing transformers package... Please wait and refresh the page.")
+    st.stop()
 import torch
 import os
 import tempfile
