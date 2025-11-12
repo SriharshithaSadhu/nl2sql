@@ -201,11 +201,26 @@ Preferred communication style: Simple, everyday language.
 5. **AI Prompt Quality**: Added SUM few-shot example and explicit syntax instructions to prevent malformed SQL
 6. **SQL Repair Robustness**: Improved column quoting to be more conservative and avoid false matches
 
-## Future Architectural Considerations
-The `attached_assets` folder references a planned multi-tier architecture with:
-- Separate backend (FastAPI) and frontend directories
-- Model training infrastructure (Colab notebook references)
-- Spider dataset integration for fine-tuning
-- Virtual environment setup with additional dependencies (FastAPI, uvicorn)
+## User Authentication & Multi-User Support (November 12, 2025)
+- **PostgreSQL Database**: Created for persistent user data and chat storage
+- **User Management**: Username/password authentication with bcrypt password hashing
+- **Database Schema**:
+  - `users` table: id, username, email, password_hash, display_name, created_at
+  - `chats` table: id, user_id (FK), title, created_at, updated_at
+  - `messages` table: id, chat_id (FK), role, content, sql_query, rows_returned, success, created_at
+- **Signup/Signin UI**: Tab-based interface for new user registration and existing user login
+- **Session Management**: Streamlit session state tracks authenticated user
+- **Per-User Chat History**: Each user sees only their own conversations
+- **Chat Management**:
+  - Create new chats (➕ New Chat button)
+  - Continue previous chats (click chat from sidebar list)
+  - Auto-saves all questions and answers to database
+  - Displays last 10 chats in sidebar
+- **Logout Functionality**: Secure logout that clears session
+- **SQL Privacy Maintained**: Generated SQL stored server-side but never shown to users
 
-**Note**: The current implementation is a streamlined Streamlit monolith optimized for single-user data exploration, while project notes suggest evolution toward a decoupled FastAPI backend architecture for multi-user deployment.
+## Future Architectural Considerations
+- **Multi-Table JOIN Enhancement**: Planned improvements to SQL generation for cross-table queries
+- **FK-Aware Query Generation**: Leverage detected foreign key relationships for automatic JOIN construction
+- **Advanced Chat Features**: Chat deletion, renaming, search across chat history
+- **Model Training**: Spider dataset integration for fine-tuning SQL generation

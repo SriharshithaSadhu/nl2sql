@@ -8,6 +8,7 @@ import torch
 import os
 import tempfile
 from typing import Dict, List, Tuple, Optional
+import database
 
 st.set_page_config(
     page_title="AskDB - Natural Language to SQL",
@@ -788,9 +789,95 @@ def create_visualizations(df: pd.DataFrame):
         fig = px.histogram(df, x=numeric_cols[0], title=f"Distribution of {numeric_cols[0]}")
         st.plotly_chart(fig, use_container_width=True)
 
+def show_login_page():
+    st.title("🔐 Welcome to AskDB")
+    st.markdown("### Sign in to continue")
+    
+    tab1, tab2 = st.tabs(["Sign In", "Sign Up"])
+    
+    with tab1:
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Sign In")
+            
+            if submit:
+                if not username or not password:
+                    st.error("Please enter both username and password")
+                else:
+                    try:
+                        user = database.authenticate_user(username, password)
+                        if user:
+                            st.session_state.user_id = user.id
+                            st.session_state.username = user.username
+                            st.session_state.display_name = user.display_name
+                            st.session_state.current_chat_id = None
+                            st.success(f"Welcome back, {user.display_name}!")
+                            st.rerun()
+                        else:
+                            st.error("Invalid username or password")
+                    except Exception as e:
+                        st.error("Login failed. Please try again or contact the administrator.")
+                        print(f"Login error: {e}")
+    
+    with tab2:
+        with st.form("signup_form"):
+            new_username = st.text_input("Username*")
+            new_email = st.text_input("Email*")
+            new_display_name = st.text_input("Display Name (optional)")
+            new_password = st.text_input("Password*", type="password")
+            confirm_password = st.text_input("Confirm Password*", type="password")
+            signup_submit = st.form_submit_button("Sign Up")
+            
+            if signup_submit:
+                if not new_username or not new_email or not new_password:
+                    st.error("Please fill in all required fields")
+                elif new_password != confirm_password:
+                    st.error("Passwords do not match")
+                elif len(new_password) < 6:
+                    st.error("Password must be at least 6 characters long")
+                else:
+                    try:
+                        user = database.create_user(
+                            username=new_username,
+                            email=new_email,
+                            password=new_password,
+                            display_name=new_display_name or new_username
+                        )
+                        if user:
+                            st.success("✅ Account created successfully! Please sign in.")
+                        else:
+                            st.error("Username or email already exists")
+                    except Exception as e:
+                        st.error("Signup failed. Please try again or contact the administrator.")
+                        print(f"Signup error: {e}")
+
+
 def main():
+    # Initialize database
+    db_initialized = database.init_db()
+    if not db_initialized:
+        st.error("⚠️ Database connection failed. Please contact the administrator.")
+        st.info("The application requires a PostgreSQL database connection to function.")
+        st.stop()
+        return
+    
+    # Initialize session state for authentication
+    if 'user_id' not in st.session_state:
+        st.session_state.user_id = None
+    if 'username' not in st.session_state:
+        st.session_state.username = None
+    if 'current_chat_id' not in st.session_state:
+        st.session_state.current_chat_id = None
+    
+    # Show login page if not authenticated
+    if not st.session_state.user_id:
+        show_login_page()
+        return
+    
+    # User is authenticated - show main app
     st.title("🗄️ AskDB - Natural Language to SQL Query System")
-    st.markdown("Ask questions about your database in plain English and get SQL-powered answers!")
+    st.markdown(f"**Welcome, {st.session_state.get('display_name', st.session_state.username)}!** Ask questions about your database in plain English and get SQL-powered answers!")
     
     # Initialize session state
     if 'db_path' not in st.session_state:
@@ -805,6 +892,59 @@ def main():
         st.session_state.chat_history = []
     
     with st.sidebar:
+        # Chat Management Section
+        st.header("💬 Chat Management")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("➕ New Chat", use_container_width=True):
+                # Create new chat
+                chat = database.create_chat(st.session_state.user_id, "New Conversation")
+                if chat:
+                    st.session_state.current_chat_id = chat.id
+                    st.session_state.chat_history = []
+                    st.success("New chat created!")
+                    st.rerun()
+        
+        with col2:
+            if st.button("🚪 Logout", use_container_width=True):
+                st.session_state.user_id = None
+                st.session_state.username = None
+                st.session_state.current_chat_id = None
+                st.rerun()
+        
+        # Show existing chats
+        user_chats = database.get_user_chats(st.session_state.user_id)
+        if user_chats:
+            st.subheader("Your Chats")
+            for chat in user_chats[:10]:  # Show last 10 chats
+                chat_title = chat.title if chat.title != "New Conversation" else f"Chat {chat.id}"
+                is_current = chat.id == st.session_state.current_chat_id
+                button_label = f"{'▶ ' if is_current else ''}{chat_title[:30]}"
+                
+                if st.button(button_label, key=f"chat_{chat.id}", use_container_width=True):
+                    st.session_state.current_chat_id = chat.id
+                    # Load chat messages
+                    messages = database.get_chat_messages(chat.id)
+                    st.session_state.chat_history = []
+                    for msg in messages:
+                        if msg.role == 'user':
+                            # Load user question and assistant response together
+                            pass
+                        else:
+                            st.session_state.chat_history.append({
+                                'timestamp': msg.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                                'question': messages[messages.index(msg)-1].content if messages.index(msg) > 0 else "",
+                                'answer': msg.content,
+                                'rows': msg.rows_returned,
+                                'success': msg.success == 1
+                            })
+                    st.rerun()
+        else:
+            st.info("No chats yet. Click 'New Chat' to start!")
+        
+        st.divider()
+        
         st.header("📁 Database Upload")
         
         uploaded_files = st.file_uploader(
@@ -1014,6 +1154,25 @@ def main():
                 
                 # Add to chat history
                 import datetime
+                
+                # Create chat if none exists
+                if not st.session_state.current_chat_id:
+                    chat = database.create_chat(st.session_state.user_id, question[:100])
+                    if chat:
+                        st.session_state.current_chat_id = chat.id
+                
+                # Save to database
+                if st.session_state.current_chat_id:
+                    database.add_message(st.session_state.current_chat_id, "user", question)
+                    database.add_message(
+                        st.session_state.current_chat_id, 
+                        "assistant", 
+                        f"Error: {error}",
+                        sql_query=None,
+                        rows_returned=0,
+                        success=False
+                    )
+                
                 st.session_state.chat_history.append({
                     'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     'question': question,
@@ -1046,6 +1205,25 @@ def main():
                 
                 # Add to chat history
                 import datetime
+                
+                # Create chat if none exists
+                if not st.session_state.current_chat_id:
+                    chat = database.create_chat(st.session_state.user_id, question[:100])
+                    if chat:
+                        st.session_state.current_chat_id = chat.id
+                
+                # Save to database
+                if st.session_state.current_chat_id:
+                    database.add_message(st.session_state.current_chat_id, "user", question)
+                    database.add_message(
+                        st.session_state.current_chat_id,
+                        "assistant",
+                        summary if not df.empty else "Query executed successfully",
+                        sql_query=sql_query,
+                        rows_returned=len(df),
+                        success=True
+                    )
+                
                 st.session_state.chat_history.append({
                     'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     'question': question,
