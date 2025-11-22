@@ -20,16 +20,69 @@ def init_db_connection():
         return True
     
     if not DATABASE_URL:
-        print("ERROR: DATABASE_URL environment variable is not set")
-        return False
+        print("WARNING: DATABASE_URL environment variable is not set. Using SQLite fallback.")
+        # Fallback to SQLite for local development
+        fallback_url = "sqlite:///./askdb_auth.sqlite3"
+        try:
+            engine = create_engine(fallback_url, pool_pre_ping=True)
+            SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+            print(f"Using SQLite fallback: {fallback_url}")
+            return True
+        except Exception as e:
+            print(f"ERROR: Failed to initialize SQLite fallback: {e}")
+            return False
     
     try:
-        engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+        # Handle PostgreSQL connection string with special characters
+        db_url = DATABASE_URL
+        # For PostgreSQL, use psycopg2 connection args properly
+        if db_url.startswith('postgresql://'):
+            # For psycopg2, SSL mode should be in the URL, not connect_args
+            # Remove channel_binding if present (not supported by all drivers)
+            if 'channel_binding=require' in db_url:
+                db_url = db_url.replace('&channel_binding=require', '').replace('channel_binding=require&', '').replace('?channel_binding=require', '?').replace('&channel_binding=require', '')
+                if db_url.endswith('?'):
+                    db_url = db_url[:-1]
+            
+            # Create engine with connection timeout
+            engine = create_engine(
+                db_url, 
+                pool_pre_ping=True,
+                pool_timeout=5,  # 5 second timeout
+                connect_args={
+                    "connect_timeout": 5
+                }
+            )
+        else:
+            engine = create_engine(db_url, pool_pre_ping=True)
+        
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        return True
+        # Test connection with timeout
+        from sqlalchemy import text
+        import signal
+        
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(text("SELECT 1"))
+                result.fetchone()  # Actually fetch to test
+            print(f"Successfully connected to database")
+            return True
+        except Exception as conn_error:
+            print(f"Connection test failed: {conn_error}")
+            raise
     except Exception as e:
         print(f"ERROR: Failed to initialize database: {e}")
-        return False
+        print(f"Attempting SQLite fallback...")
+        # Fallback to SQLite
+        try:
+            fallback_url = "sqlite:///./askdb_auth.sqlite3"
+            engine = create_engine(fallback_url, pool_pre_ping=True)
+            SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+            print(f"Using SQLite fallback: {fallback_url}")
+            return True
+        except Exception as fallback_error:
+            print(f"ERROR: SQLite fallback also failed: {fallback_error}")
+            return False
 
 class User(Base):
     __tablename__ = "users"
@@ -77,6 +130,16 @@ class Message(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     chat = relationship("Chat", back_populates="messages")
+
+class Log(Base):
+    __tablename__ = "logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=True)
+    action = Column(String(100), nullable=False)
+    detail = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 
 
 def init_db():
@@ -245,6 +308,27 @@ def delete_chat(chat_id: int, user_id: int) -> bool:
     except Exception as e:
         db.rollback()
         print(f"Error deleting chat: {e}")
+        return False
+    finally:
+        db.close()
+
+def create_log(user_id: Optional[int], action: str, detail: str) -> bool:
+    if not init_db_connection():
+        return False
+    
+    db = SessionLocal()
+    try:
+        log = Log(
+            user_id=user_id,
+            action=action,
+            detail=detail
+        )
+        db.add(log)
+        db.commit()
+        return True
+    except Exception as e:
+        db.rollback()
+        print(f"ERROR creating log: {e}")
         return False
     finally:
         db.close()

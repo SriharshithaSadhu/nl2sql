@@ -1,18 +1,51 @@
+from dotenv import load_dotenv
+load_dotenv()
+
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), "backend"))
+
+
 import streamlit as st
 import pandas as pd
 import sqlite3
 import plotly.express as px
 import plotly.graph_objects as go
+
+
+TRANSFORMERS_AVAILABLE = True
 try:
     from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 except ImportError:
-    st.error("⚠️ Installing transformers package... Please wait and refresh the page.")
-    st.stop()
+    # Do not stop the app; fall back to template-based SQL generation
+    TRANSFORMERS_AVAILABLE = False
+    AutoTokenizer = None
+    AutoModelForSeq2SeqLM = None
+    st.warning("Transformers not available; using template-based SQL generation.")
+
 import torch
 import os
 import tempfile
 from typing import Dict, List, Tuple, Optional
 import database
+
+try:
+    from ui_enhancements import inject_custom_css, render_app_header, render_stat_card, render_feature_card
+    UI_ENHANCEMENTS_AVAILABLE = True
+except ImportError as e:
+    print(f"UI enhancements not available: {e}")
+    UI_ENHANCEMENTS_AVAILABLE = False
+    # Fallback functions
+    def inject_custom_css():
+        pass
+    def render_app_header(title, subtitle):
+        st.title(title)
+        st.markdown(subtitle)
+    def render_stat_card(value, label):
+        st.metric(label, value)
+    def render_feature_card(title, description, icon="✨"):
+        st.markdown(f"**{icon} {title}**")
+        st.write(description)
 
 st.set_page_config(
     page_title="AskDB - Natural Language to SQL",
@@ -21,19 +54,49 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Inject custom CSS for stunning UI
+try:
+    inject_custom_css()
+except Exception as e:
+    print(f"CSS injection error (non-critical): {e}")
+
 @st.cache_resource
 def load_nl2sql_model(model_name: str = "mrm8488/t5-base-finetuned-wikiSQL"):
+    if not TRANSFORMERS_AVAILABLE:
+        return None, None
     hf_token = os.environ.get('HUGGING_FACE_TOKEN', None)
-    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name, token=hf_token)
-    return tokenizer, model
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, token=hf_token)
+        return tokenizer, model
+    except Exception as e:
+        st.warning(f"NL2SQL model unavailable ({e}); using templates only.")
+        return None, None
 
 @st.cache_resource
 def load_summarization_model(model_name: str = "t5-small"):
+    if not TRANSFORMERS_AVAILABLE:
+        return None, None
     hf_token = os.environ.get('HUGGING_FACE_TOKEN', None)
-    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name, token=hf_token)
-    return tokenizer, model
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, token=hf_token)
+        return tokenizer, model
+    except Exception as e:
+        st.warning(f"Summarization model unavailable ({e}); skipping summaries.")
+        return None, None
+
+# --- GLOBAL MODEL LOAD (prevents Streamlit rerun crash) ---
+@st.cache_resource
+def get_nl2sql():
+    return load_nl2sql_model()
+
+@st.cache_resource
+def get_summarizer():
+    return load_summarization_model()
+
+# ----------------------------------------------------------
+
 
 def extract_schema(db_path: str) -> Dict[str, List[str]]:
     """Extract schema with column names"""
@@ -687,6 +750,14 @@ def generate_sql(question: str, schema_str: str, tokenizer, model, db_path: str 
             print(f"[TEMPLATE FAST-PATH] {question}")
             return template_sql
     
+    # If transformers are unavailable, return template-based or safe fallback
+    if tokenizer is None or model is None:
+        # Try templates already attempted above; if none matched, return safe SELECT *
+        sql_fallback = f"SELECT * FROM {quoted_table}"
+        sql_fallback = repair_sql(sql_fallback, table_name, columns, all_columns, is_multi_table_query)
+        print(f"[FALLBACK: NO MODEL] {sql_fallback}")
+        return sql_fallback
+
     # AI-first approach with enhanced prompting (handles both single and multi-table)
     if is_multi_table_query:
         print(f"[AI-FIRST MULTI-TABLE] {question}")
@@ -786,22 +857,34 @@ For JOIN queries, use the relationships listed above to connect tables properly.
 Question: {question}
 SQL:"""
     
-    inputs = tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True)
-    
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_length=150,
-            num_beams=5,
-            early_stopping=True,
-            temperature=0.2,
-            do_sample=True,
-            top_p=0.95,
-            repetition_penalty=1.2
-        )
-    
-    sql = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    
+    try:
+        inputs = tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True)
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_length=150,
+                num_beams=5,
+                early_stopping=True,
+                temperature=0.2,
+                do_sample=True,
+                top_p=0.95,
+                repetition_penalty=1.2
+            )
+        sql = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    except Exception as e:
+        print(f"[AI GENERATION ERROR] {e}")
+        # Fallback: prefer templates; otherwise safe SELECT *
+        if is_multi_table_query and related_tables:
+            join_template_sql = get_join_template_sql(question, related_tables, all_columns, foreign_keys, db_path)
+            if join_template_sql:
+                print(f"[JOIN TEMPLATE FALLBACK] {question}")
+                sql = join_template_sql
+            else:
+                sql = f"SELECT * FROM {quoted_table}"
+        else:
+            template_sql = get_template_sql(question, table_name, columns, db_path)
+            sql = template_sql if template_sql else f"SELECT * FROM {quoted_table}"
+
     # Repair and validate the generated SQL
     sql = repair_sql(sql, table_name, columns, all_columns, is_multi_table_query)
     
@@ -809,7 +892,8 @@ SQL:"""
     return sql
 
 def explain_sql_query(sql: str, question: str, schema: Dict) -> str:
-    """Convert SQL query to plain English explanation without revealing SQL code"""
+    """Convert SQL query to plain English explanation without revealing SQL code.
+    Enhanced with detailed explanations for advanced features."""
     import re
     
     sql_upper = sql.upper()
@@ -818,6 +902,21 @@ def explain_sql_query(sql: str, question: str, schema: Dict) -> str:
     # Extract table names from schema
     table_names = list(schema.keys())
     
+    # Detect JOIN types
+    has_inner_join = 'INNER JOIN' in sql_upper or ('JOIN' in sql_upper and 'LEFT' not in sql_upper and 'RIGHT' not in sql_upper and 'FULL' not in sql_upper and 'CROSS' not in sql_upper)
+    has_left_join = 'LEFT JOIN' in sql_upper
+    has_right_join = 'RIGHT JOIN' in sql_upper
+    has_full_join = 'FULL OUTER JOIN' in sql_upper or 'FULL JOIN' in sql_upper
+    has_cross_join = 'CROSS JOIN' in sql_upper
+    has_join = any([has_inner_join, has_left_join, has_right_join, has_full_join, has_cross_join])
+    
+    # Detect subqueries
+    has_subquery = sql_upper.count('SELECT') > 1
+    has_correlated_subquery = 'WHERE' in sql_upper and sql_upper.count('SELECT') > 1 and any(t.upper() + '.' in sql_upper for t in table_names)
+    
+    # Detect window functions
+    has_window = any(func in sql_upper for func in ['ROW_NUMBER()', 'RANK()', 'DENSE_RANK()', 'LEAD(', 'LAG(', 'OVER ('])
+    
     # Detect aggregations
     has_count = 'COUNT(' in sql_upper
     has_avg = 'AVG(' in sql_upper or 'AVERAGE' in sql_upper
@@ -825,21 +924,40 @@ def explain_sql_query(sql: str, question: str, schema: Dict) -> str:
     has_max = 'MAX(' in sql_upper
     has_min = 'MIN(' in sql_upper
     
-    # Detect JOINs
-    has_join = 'JOIN' in sql_upper
-    
     # Detect filtering
     has_where = 'WHERE' in sql_upper
     has_group_by = 'GROUP BY' in sql_upper
+    has_having = 'HAVING' in sql_upper
     has_order_by = 'ORDER BY' in sql_upper
     has_limit = 'LIMIT' in sql_upper
+    has_between = 'BETWEEN' in sql_upper
+    has_case = 'CASE' in sql_upper and 'WHEN' in sql_upper
+    has_in = ' IN (' in sql_upper and not has_subquery
     
     # Build explanation
     if has_join:
-        # Multi-table query
+        # Multi-table query with JOIN type
         involved_tables = [t for t in table_names if t.lower() in sql.lower()]
         if len(involved_tables) >= 2:
-            explanation_parts.append(f"This query combines data from {len(involved_tables)} related tables: {', '.join(involved_tables)}.")
+            join_type_desc = ""
+            if has_left_join:
+                join_type_desc = " (including all records from the first table)"
+            elif has_right_join:
+                join_type_desc = " (including all records from the second table)"
+            elif has_full_join:
+                join_type_desc = " (including all records from both tables)"
+            elif has_cross_join:
+                join_type_desc = " (all combinations)"
+            explanation_parts.append(f"This query combines data from {len(involved_tables)} related tables: {', '.join(involved_tables)}{join_type_desc}.")
+    
+    if has_subquery:
+        if has_correlated_subquery:
+            explanation_parts.append("It uses a correlated subquery to compare values within groups.")
+        else:
+            explanation_parts.append("It uses a subquery to filter or compare data.")
+    
+    if has_window:
+        explanation_parts.append("It uses window functions to calculate values across rows within partitions.")
     
     if has_count:
         explanation_parts.append("It counts the number of matching records.")
@@ -859,6 +977,18 @@ def explain_sql_query(sql: str, question: str, schema: Dict) -> str:
     
     if has_group_by:
         explanation_parts.append("Data is grouped and aggregated by categories.")
+    
+    if has_having:
+        explanation_parts.append("Groups are filtered based on aggregate conditions.")
+    
+    if has_between:
+        explanation_parts.append("Results are filtered using a range condition.")
+    
+    if has_case:
+        explanation_parts.append("Data is categorized using conditional logic.")
+    
+    if has_in:
+        explanation_parts.append("Results are filtered to match a list of values.")
     
     if has_order_by:
         explanation_parts.append("Results are sorted in a specific order.")
@@ -1107,8 +1237,7 @@ def create_visualizations(df: pd.DataFrame):
         st.plotly_chart(fig, use_container_width=True)
 
 def show_login_page():
-    st.title("🔐 Welcome to AskDB")
-    st.markdown("### Sign in to continue")
+    render_app_header("Welcome to AskDB", "Sign in to access your AI-powered SQL assistant")
     
     tab1, tab2 = st.tabs(["Sign In", "Sign Up"])
     
@@ -1171,15 +1300,28 @@ def show_login_page():
 
 
 def main():
-    # Initialize database
-    db_initialized = database.init_db()
-    if not db_initialized:
-        st.error("⚠️ Database connection failed. Please contact the administrator.")
-        st.info("The application requires a PostgreSQL database connection to function.")
-        st.stop()
-        return
+    # Initialize database with graceful error handling - NEVER stop execution
+    db_initialized = False
+    try:
+        db_initialized = database.init_db()
+        if db_initialized:
+            # Success - continue silently
+            pass
+        else:
+            # Failed but continue with fallback
+            st.warning("⚠️ Database connection failed. Using SQLite fallback mode.")
+    except Exception as e:
+        # Error but continue anyway
+        st.warning(f"⚠️ Database initialization error: {str(e)}")
+        st.info("💡 Continuing with SQLite fallback mode.")
+        print(f"Database init error: {e}")
+        # Try fallback
+        try:
+            db_initialized = database.init_db()
+        except:
+            pass
     
-    # Initialize session state for authentication
+    # Initialize session state for authentication - ALWAYS continue
     if 'user_id' not in st.session_state:
         st.session_state.user_id = None
     if 'username' not in st.session_state:
@@ -1187,14 +1329,19 @@ def main():
     if 'current_chat_id' not in st.session_state:
         st.session_state.current_chat_id = None
     
-    # Show login page if not authenticated
+    # Show login page if not authenticated - ALWAYS render something
     if not st.session_state.user_id:
-        show_login_page()
+        try:
+            show_login_page()
+        except Exception as e:
+            # Fallback if login page fails
+            st.error(f"Error loading login page: {str(e)}")
+            st.info("Please refresh the page or check the console for errors.")
+            print(f"Login page error: {e}")
         return
     
     # User is authenticated - show main app
-    st.title("🗄️ AskDB - Natural Language to SQL Query System")
-    st.markdown(f"**Welcome, {st.session_state.get('display_name', st.session_state.username)}!** Ask questions about your database in plain English and get SQL-powered answers!")
+    render_app_header("AskDB", f"Welcome, {st.session_state.get('display_name', st.session_state.username)}! Ask questions in natural language and get instant SQL results.")
     
     # Initialize session state
     if 'db_path' not in st.session_state:
@@ -1409,16 +1556,21 @@ def main():
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.markdown("**🤖 AI-Powered SQL Generation**")
-            st.write("Convert natural language questions to SQL using Hugging Face T5 models")
+            render_feature_card("AI-Powered SQL Generation", "Convert natural language questions to SQL using advanced T5 models with template fallback", "🤖")
         
         with col2:
-            st.markdown("**🔒 Safe Query Execution**")
-            st.write("Only SELECT queries allowed to protect your data")
+            render_feature_card("Safe Query Execution", "Read-only queries with automatic validation. Your data is always protected.", "🔒")
         
         with col3:
-            st.markdown("**📊 Auto Visualizations**")
-            st.write("Automatic chart generation for numeric data")
+            render_feature_card("Auto Visualizations", "Automatic chart generation for numeric data with interactive Plotly charts", "📊")
+        
+        col4, col5, col6 = st.columns(3)
+        with col4:
+            render_feature_card("Multi-Table JOINs", "Intelligent foreign key detection and automatic JOIN generation across related tables", "🔗")
+        with col5:
+            render_feature_card("Advanced SQL", "Support for HAVING clauses, complex ORDER BY, GROUP BY, and aggregations", "⚡")
+        with col6:
+            render_feature_card("Natural Summaries", "AI-generated plain English explanations of your query results", "💡")
         
         st.markdown("### 📝 Example Questions")
         st.markdown("**📊 For any database (orders, customers, products, etc.):**")
@@ -1455,7 +1607,7 @@ def main():
         
         if generate_button and question:
             with st.spinner("🤖 Loading AI model..."):
-                nl2sql_tokenizer, nl2sql_model = load_nl2sql_model()
+                nl2sql_tokenizer, nl2sql_model = get_nl2sql()
             
             schema_str = format_schema_for_model(st.session_state.schema)
             
@@ -1512,15 +1664,40 @@ def main():
                 st.subheader("🔍 What This Query Does")
                 st.info(explanation)
                 
+                # Display stats
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    render_stat_card(str(len(df)), "Rows Returned")
+                with col2:
+                    render_stat_card(str(len(df.columns)), "Columns")
+                with col3:
+                    render_stat_card("✅", "Status")
+                
                 st.subheader("📋 Query Results")
                 st.dataframe(df, use_container_width=True)
+                
+                # CSV Download
+                if not df.empty:
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Results as CSV",
+                        data=csv,
+                        file_name=f"query_results_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        type="primary"
+                    )
                 
                 if not df.empty:
                     create_visualizations(df)
                     
                     with st.spinner("📝 Generating natural language summary..."):
-                        summary_tokenizer, summary_model = load_summarization_model()
-                        summary = generate_summary(df, question, summary_tokenizer, summary_model)
+                        summary_tokenizer, summary_model = get_summarizer()
+                        if summary_tokenizer is not None and summary_model is not None:
+                            summary = generate_summary(df, question, summary_tokenizer, summary_model)
+                            st.subheader("🗒️ Summary")
+                            st.write(summary)
+                        else:
+                            st.info("Summary unavailable: model not loaded. Results are shown above.")
                     
                     st.subheader("💡 Summary")
                     st.info(summary)
@@ -1606,4 +1783,13 @@ def main():
                         st.error(f"❌ Failed - {query.get('error', 'Unknown error')}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        # Last resort error handling - show something instead of white screen
+        st.error("⚠️ Application Error")
+        st.exception(e)
+        st.info("Please check the console for detailed error messages.")
+        print(f"Fatal error in main(): {e}")
+        import traceback
+        traceback.print_exc()

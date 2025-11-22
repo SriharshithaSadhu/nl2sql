@@ -1,0 +1,33 @@
+plotly
+
+plotly
+
+# Core dependencies
+bcrypt>=5.0.0
+pandas>=2.3.3
+sqlalchemy>=2.0.44
+psycopg2-binary>=2.9.11
+
+# File format support
+openpyxl>=3.1.5
+xlrd>=2.0.2
+
+# ML/AI
+torch>=2.9.0
+transformers>=4.30.0
+sentencepiece>=0.2.1
+
+# FastAPI backend
+fastapi>=0.104.0
+uvicorn>=0.24.0
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+python-multipart>=0.0.6
+pydantic[email]>=2.0.0
+
+# Streamlit frontend
+streamlit>=1.51.0
+plotly>=6.4.0
+
+# Utilities
+python-dotenv>=1.0.0

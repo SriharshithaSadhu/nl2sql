@@ -1,0 +1,11 @@
+id,name,department,salary,age,city
+1,John Smith,Engineering,75000,28,New York
+2,Jane Doe,Marketing,65000,32,San Francisco
+3,Bob Johnson,Engineering,80000,35,New York
+4,Alice Williams,Sales,70000,29,Chicago
+5,Charlie Brown,Engineering,90000,40,San Francisco
+6,Diana Prince,Marketing,72000,31,Los Angeles
+7,Eve Adams,Sales,68000,27,Chicago
+8,Frank Miller,Engineering,85000,38,New York
+9,Grace Lee,Marketing,71000,30,San Francisco
+10,Henry Ford,Sales,75000,33,Los Angeles
