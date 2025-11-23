@@ -1348,6 +1348,9 @@ def main():
         if st.button("📂 Open Chat View", use_container_width=True):
             st.session_state.open_chat_now = True
             st.rerun()
+    # Ensure active_menu exists before any checks
+    if 'active_menu' not in st.session_state:
+        st.session_state.active_menu = 'Query Builder'
     
     # Initialize session state
     if 'db_path' not in st.session_state:
@@ -1438,6 +1441,20 @@ def main():
                             'success': True
                         })
                     st.session_state.open_chat_now = True
+                    st.rerun()
+                selected_id = chat_options[selected_title]
+                cols = st.columns([3, 1, 1])
+                new_title = cols[0].text_input("Rename", value=selected_title, key=f"rename_{selected_id}")
+                if cols[1].button("Save Title", use_container_width=True, key=f"save_title_{selected_id}"):
+                    database.update_chat_title(selected_id, st.session_state.user_id, new_title)
+                    st.success("Title updated")
+                    st.rerun()
+                if cols[2].button("Delete", use_container_width=True, key=f"delete_{selected_id}"):
+                    database.delete_chat(selected_id, st.session_state.user_id)
+                    if st.session_state.current_chat_id == selected_id:
+                        st.session_state.current_chat_id = None
+                        st.session_state.chat_history = []
+                    st.success("Chat deleted")
                     st.rerun()
             # Quick buttons (last 10)
             for chat in user_chats[:10]:
@@ -1930,6 +1947,36 @@ def main():
                         st.success(f"✅ Success - {query['rows']} rows returned")
                     else:
                         st.error(f"❌ Failed - {query.get('error', 'Unknown error')}")
+
+    if st.session_state.active_menu == 'Schema Explorer':
+        st.subheader("🧬 Schema Explorer")
+        if st.session_state.schema:
+            # Visual graph if multiple tables
+            if len(st.session_state.schema) > 1:
+                with st.expander("🗺️ Visual Schema Graph", expanded=True):
+                    create_schema_graph(st.session_state.schema, st.session_state.db_path)
+            # Table structures
+            for table_name, columns in st.session_state.schema.items():
+                with st.expander(f"📊 Table: {table_name}"):
+                    st.code(f"{table_name}(\n  " + ",\n  ".join(columns) + "\n)")
+        else:
+            st.info("No schema loaded yet. Upload a database in the sidebar.")
+
+    if st.session_state.active_menu == 'Settings':
+        st.subheader("⚙ Settings")
+        st.caption("Configure preferences and appearance.")
+        reset_cols = st.columns(3)
+        if reset_cols[0].button("Clear Chat History"):
+            st.session_state.chat_history = []
+            st.success("Cleared chat history")
+        if reset_cols[1].button("Clear Query History"):
+            st.session_state.query_history = []
+            st.success("Cleared query history")
+        if reset_cols[2].button("Logout"):
+            st.session_state.user_id = None
+            st.session_state.username = None
+            st.session_state.current_chat_id = None
+            st.experimental_rerun()
 
 if __name__ == "__main__":
     try:
