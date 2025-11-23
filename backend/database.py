@@ -321,6 +321,23 @@ def delete_chat(chat_id: int, user_id: int) -> bool:
     finally:
         db.close()
 
+def update_chat_title(chat_id: int, user_id: int, new_title: str) -> bool:
+    db = SessionLocal()
+    try:
+        chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user_id).first()
+        if not chat:
+            return False
+        chat.title = new_title[:500]
+        chat.updated_at = datetime.utcnow()
+        db.commit()
+        return True
+    except Exception as e:
+        db.rollback()
+        print(f"Error updating chat title: {e}")
+        return False
+    finally:
+        db.close()
+
 def create_log(user_id: Optional[int], action: str, detail: str) -> bool:
     if not init_db_connection():
         return False

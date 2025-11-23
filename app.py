@@ -1221,16 +1221,30 @@ def create_visualizations(df: pd.DataFrame):
         st.plotly_chart(fig, use_container_width=True)
 
 def show_login_page():
-    render_app_header("Welcome to AskDB", "Sign in to access your AI-powered SQL assistant")
-    
-    tab1, tab2 = st.tabs(["Sign In", "Sign Up"])
-    
-    with tab1:
+    if 'auth_view' not in st.session_state:
+        st.session_state.auth_view = 'login'
+    render_app_header("Natural Language → SQL", "Sign in to use the AI assistant")
+    top_cols = st.columns([4,2])
+    with top_cols[0]:
+        st.markdown("""
+        Welcome to AskDB — a Natural Language to SQL platform. Type in English and get precise SQL with instant results. Explore your schema visually and keep a history of all your queries.
+        """)
+    with top_cols[1]:
+        c1, c2 = st.columns(2)
+        if c1.button("Login", use_container_width=True):
+            st.session_state.auth_view = 'login'
+            st.rerun()
+        if c2.button("Sign Up", use_container_width=True):
+            st.session_state.auth_view = 'signup'
+            st.rerun()
+
+    st.divider()
+    if st.session_state.auth_view == 'login':
+        st.subheader("Login")
         with st.form("login_form"):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
             submit = st.form_submit_button("Sign In")
-            
             if submit:
                 if not username or not password:
                     st.error("Please enter both username and password")
@@ -1249,8 +1263,8 @@ def show_login_page():
                     except Exception as e:
                         st.error("Login failed. Please try again or contact the administrator.")
                         print(f"Login error: {e}")
-    
-    with tab2:
+    else:
+        st.subheader("Create Account")
         with st.form("signup_form"):
             new_username = st.text_input("Username*")
             new_email = st.text_input("Email*")
@@ -1258,7 +1272,6 @@ def show_login_page():
             new_password = st.text_input("Password*", type="password")
             confirm_password = st.text_input("Confirm Password*", type="password")
             signup_submit = st.form_submit_button("Sign Up")
-            
             if signup_submit:
                 if not new_username or not new_email or not new_password:
                     st.error("Please fill in all required fields")
@@ -1276,6 +1289,8 @@ def show_login_page():
                         )
                         if user:
                             st.success("✅ Account created successfully! Please sign in.")
+                            st.session_state.auth_view = 'login'
+                            st.rerun()
                         else:
                             st.error("Username or email already exists")
                     except Exception as e:
@@ -1347,6 +1362,25 @@ def main():
         st.session_state.chat_history = []
     
     with st.sidebar:
+        # Icon Navigation
+        st.markdown("<div class='icon-item' style='margin-bottom:8px;'>🧠 Query Builder</div>", unsafe_allow_html=True)
+        if st.button("Open Query Builder", use_container_width=True, key="menu_qb"):
+            st.session_state.active_menu = 'Query Builder'
+            st.rerun()
+        st.markdown("<div class='icon-item' style='margin-bottom:8px;'>🧬 Schema Explorer</div>", unsafe_allow_html=True)
+        if st.button("Open Schema Explorer", use_container_width=True, key="menu_schema"):
+            st.session_state.active_menu = 'Schema Explorer'
+            st.rerun()
+        st.markdown("<div class='icon-item' style='margin-bottom:8px;'>🕘 Query History</div>", unsafe_allow_html=True)
+        if st.button("Open Query History", use_container_width=True, key="menu_qh"):
+            st.session_state.active_menu = 'Query History'
+            st.rerun()
+        st.markdown("<div class='icon-item' style='margin-bottom:8px;'>⚙ Settings</div>", unsafe_allow_html=True)
+        if st.button("Open Settings", use_container_width=True, key="menu_settings"):
+            st.session_state.active_menu = 'Settings'
+            st.rerun()
+
+        st.divider()
         # Chat Management Section
         st.header("💬 Chat Management")
         
@@ -1443,7 +1477,6 @@ def main():
             st.info("No chats yet. Click 'New Chat' to start!")
         
         st.divider()
-        
         st.header("📁 Database Upload")
         
         uploaded_files = st.file_uploader(
@@ -1708,22 +1741,16 @@ def main():
                         })
         st.session_state.open_chat_now = False
 
-    tab1, tab2, tab3 = st.tabs(["💬 Ask a Question", "💭 Chat History", "📜 Query History"])
-    
-    with tab1:
+    if st.session_state.active_menu == 'Query Builder':
         st.subheader("Ask Your Question")
-        
-        question = st.text_input(
-            "Enter your question in natural language:",
-            placeholder="e.g., Show me all records where score is greater than 90",
-            key="nl_question"
-        )
-        
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            generate_button = st.button("🚀 Generate & Run SQL", type="primary", use_container_width=True)
-        continue_toggle = st.checkbox("Continue current chat context", value=bool(st.session_state.get('continue_chat_mode')), help="Use last chat turns for context")
-        
+        question = st.text_area("Ask in English…", placeholder="e.g., Show all orders from New York where total > 1000", key="nl_question")
+        fab = st.container()
+        with fab:
+            st.markdown("<div class='fab'>", unsafe_allow_html=True)
+            run_query = st.button("Run Query", key="fab_run")
+            st.markdown("</div>", unsafe_allow_html=True)
+        continue_toggle = st.checkbox("Continue current chat context", value=bool(st.session_state.get('continue_chat_mode')))
+        generate_button = run_query
         if generate_button and question:
             with st.spinner("🤖 Loading AI model..."):
                 nl2sql_tokenizer, nl2sql_model = get_nl2sql()
@@ -1860,7 +1887,7 @@ def main():
                     'result_preview': df.head(3).to_dict('records') if not df.empty else []
                 })
     
-    with tab2:
+    if st.session_state.active_menu == 'Query History':
         st.subheader("💭 Chat History")
         
         if not st.session_state.chat_history:
@@ -1891,16 +1918,14 @@ def main():
                     
                     st.divider()
     
-    with tab3:
-        st.subheader("Query History")
-        
+    if st.session_state.active_menu == 'Query History':
+        st.subheader("📜 Query History")
         if not st.session_state.query_history:
             st.info("No queries yet. Ask a question to get started!")
         else:
             for idx, query in enumerate(reversed(st.session_state.query_history)):
                 with st.expander(f"Query #{len(st.session_state.query_history) - idx}: {query['question']}", expanded=False):
                     st.markdown(f"**Question:** {query['question']}")
-                    
                     if query['success']:
                         st.success(f"✅ Success - {query['rows']} rows returned")
                     else:
