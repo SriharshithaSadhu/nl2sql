@@ -6,7 +6,15 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from typing import Optional, List
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+def _load_env_database_url() -> str:
+    try:
+        from dotenv import load_dotenv, find_dotenv
+        env_path = find_dotenv()
+        if env_path:
+            load_dotenv(env_path)
+    except Exception:
+        pass
+    return os.getenv("DATABASE_URL")
 
 # Defer engine creation to allow graceful error handling
 engine = None
@@ -18,8 +26,9 @@ def init_db_connection():
     global engine, SessionLocal
     if engine is not None:
         return True
-    
-    if not DATABASE_URL:
+
+    db_url = os.getenv("DATABASE_URL") or _load_env_database_url()
+    if not db_url:
         print("WARNING: DATABASE_URL environment variable is not set. Using SQLite fallback.")
         # Fallback to SQLite for local development
         fallback_url = "sqlite:///./askdb_auth.sqlite3"
@@ -34,7 +43,7 @@ def init_db_connection():
     
     try:
         # Handle PostgreSQL connection string with special characters
-        db_url = DATABASE_URL
+        db_url = db_url
         # For PostgreSQL, use psycopg2 connection args properly
         if db_url.startswith('postgresql://'):
             # For psycopg2, SSL mode should be in the URL, not connect_args
@@ -282,8 +291,8 @@ def add_message(chat_id: int, role: str, content: str, sql_query: Optional[str] 
         chat = db.query(Chat).filter(Chat.id == chat_id).first()
         if chat:
             chat.updated_at = datetime.utcnow()
-            if role == 'user' and not chat.title.startswith("New"):
-                chat.title = content[:100]  # Use first message as title
+            if role == 'user' and chat.title.startswith("New"):
+                chat.title = content[:100]
         
         db.commit()
         db.refresh(message)

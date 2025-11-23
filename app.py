@@ -13,21 +13,18 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 
-TRANSFORMERS_AVAILABLE = True
 try:
     from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 except ImportError:
-    # Do not stop the app; fall back to template-based SQL generation
-    TRANSFORMERS_AVAILABLE = False
-    AutoTokenizer = None
-    AutoModelForSeq2SeqLM = None
-    st.warning("Transformers not available; using template-based SQL generation.")
+    st.error("⚠️ Installing transformers package... Please wait and refresh the page.")
+    st.stop()
 
 import torch
 import os
 import tempfile
 from typing import Dict, List, Tuple, Optional
 import database
+from core import generate_sql as core_generate_sql
 
 try:
     from ui_enhancements import inject_custom_css, render_app_header, render_stat_card, render_feature_card
@@ -62,29 +59,17 @@ except Exception as e:
 
 @st.cache_resource
 def load_nl2sql_model(model_name: str = "mrm8488/t5-base-finetuned-wikiSQL"):
-    if not TRANSFORMERS_AVAILABLE:
-        return None, None
     hf_token = os.environ.get('HUGGING_FACE_TOKEN', None)
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, token=hf_token)
-        return tokenizer, model
-    except Exception as e:
-        st.warning(f"NL2SQL model unavailable ({e}); using templates only.")
-        return None, None
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_name, token=hf_token)
+    return tokenizer, model
 
 @st.cache_resource
 def load_summarization_model(model_name: str = "t5-small"):
-    if not TRANSFORMERS_AVAILABLE:
-        return None, None
     hf_token = os.environ.get('HUGGING_FACE_TOKEN', None)
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, token=hf_token)
-        return tokenizer, model
-    except Exception as e:
-        st.warning(f"Summarization model unavailable ({e}); skipping summaries.")
-        return None, None
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_name, token=hf_token)
+    return tokenizer, model
 
 # --- GLOBAL MODEL LOAD (prevents Streamlit rerun crash) ---
 @st.cache_resource
@@ -627,7 +612,7 @@ def repair_sql(sql: str, table_name: str, columns: List[str], all_columns: Dict 
     
     return sql
 
-def generate_sql(question: str, schema_str: str, tokenizer, model, db_path: str = None) -> str:
+def generate_sql(question: str, schema_str: str, tokenizer, model, db_path: str = None, history: Optional[List[Dict]] = None) -> str:
     """AI-first dynamic SQL generation with templates as fast-path"""
     schema_lines = schema_str.split('\n')
     table_names = []
@@ -750,14 +735,6 @@ def generate_sql(question: str, schema_str: str, tokenizer, model, db_path: str 
             print(f"[TEMPLATE FAST-PATH] {question}")
             return template_sql
     
-    # If transformers are unavailable, return template-based or safe fallback
-    if tokenizer is None or model is None:
-        # Try templates already attempted above; if none matched, return safe SELECT *
-        sql_fallback = f"SELECT * FROM {quoted_table}"
-        sql_fallback = repair_sql(sql_fallback, table_name, columns, all_columns, is_multi_table_query)
-        print(f"[FALLBACK: NO MODEL] {sql_fallback}")
-        return sql_fallback
-
     # AI-first approach with enhanced prompting (handles both single and multi-table)
     if is_multi_table_query:
         print(f"[AI-FIRST MULTI-TABLE] {question}")
@@ -830,6 +807,20 @@ def generate_sql(question: str, schema_str: str, tokenizer, model, db_path: str 
                             join_examples += f"\nQ: Show {tbl} with {to_table} details\n"
                             join_examples += f"A: SELECT * FROM {quote_identifier(tbl)} JOIN {to_table} ON {quote_identifier(tbl)}.{from_col} = {to_table}.{to_col}\n"
     
+    # Build conversation context from history (last up to 5 turns)
+    history_str = ""
+    if history:
+        ctx = []
+        for turn in history[-5:]:
+            q = turn.get('question', '').strip()
+            a = turn.get('answer', '').strip()
+            if q:
+                ctx.append(f"Q: {q}")
+            if a:
+                ctx.append(f"A: {a}")
+        if ctx:
+            history_str = "\n\nConversation Context:\n" + "\n".join(ctx)
+
     # Few-shot prompt with ACTUAL schema-based examples (including JOINs)
     prompt = f"""Generate SQLite query using the exact table and column names provided.
 
@@ -854,6 +845,8 @@ IMPORTANT: Use correct SQL syntax with parentheses for aggregations: SUM(column)
 Do NOT add WHERE clauses unless the question explicitly requests filtering.
 For JOIN queries, use the relationships listed above to connect tables properly.
 
+{history_str}
+
 Question: {question}
 SQL:"""
     
@@ -862,29 +855,20 @@ SQL:"""
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_length=150,
-                num_beams=5,
+                max_length=128,
+                num_beams=4,
                 early_stopping=True,
                 temperature=0.2,
                 do_sample=True,
-                top_p=0.95,
+                top_p=0.9,
                 repetition_penalty=1.2
             )
         sql = tokenizer.decode(outputs[0], skip_special_tokens=True)
     except Exception as e:
-        print(f"[AI GENERATION ERROR] {e}")
-        # Fallback: prefer templates; otherwise safe SELECT *
-        if is_multi_table_query and related_tables:
-            join_template_sql = get_join_template_sql(question, related_tables, all_columns, foreign_keys, db_path)
-            if join_template_sql:
-                print(f"[JOIN TEMPLATE FALLBACK] {question}")
-                sql = join_template_sql
-            else:
-                sql = f"SELECT * FROM {quoted_table}"
-        else:
-            template_sql = get_template_sql(question, table_name, columns, db_path)
-            sql = template_sql if template_sql else f"SELECT * FROM {quoted_table}"
-
+        print(f"[AI GENERATE ERROR] {e}")
+        # Safe fallback to avoid crashing the app
+        return f"SELECT * FROM {quoted_table}"
+    
     # Repair and validate the generated SQL
     sql = repair_sql(sql, table_name, columns, all_columns, is_multi_table_query)
     
@@ -1342,6 +1326,13 @@ def main():
     
     # User is authenticated - show main app
     render_app_header("AskDB", f"Welcome, {st.session_state.get('display_name', st.session_state.username)}! Ask questions in natural language and get instant SQL results.")
+    top_chat_placeholder = st.empty()
+    # Quick navigation: always provide a way to open the chat view
+    nav_cols = st.columns([1, 1, 6])
+    with nav_cols[0]:
+        if st.button("📂 Open Chat View", use_container_width=True):
+            st.session_state.open_chat_now = True
+            st.rerun()
     
     # Initialize session state
     if 'db_path' not in st.session_state:
@@ -1367,6 +1358,7 @@ def main():
                 if chat:
                     st.session_state.current_chat_id = chat.id
                     st.session_state.chat_history = []
+                    st.session_state.open_chat_now = True
                     st.success("New chat created!")
                     st.rerun()
         
@@ -1377,32 +1369,75 @@ def main():
                 st.session_state.current_chat_id = None
                 st.rerun()
         
-        # Show existing chats
+        # Show existing chats with improved navigation
         user_chats = database.get_user_chats(st.session_state.user_id)
         if user_chats:
             st.subheader("Your Chats")
-            for chat in user_chats[:10]:  # Show last 10 chats
-                chat_title = chat.title if chat.title != "New Conversation" else f"Chat {chat.id}"
-                is_current = chat.id == st.session_state.current_chat_id
-                button_label = f"{'▶ ' if is_current else ''}{chat_title[:30]}"
-                
-                if st.button(button_label, key=f"chat_{chat.id}", use_container_width=True):
-                    st.session_state.current_chat_id = chat.id
-                    # Load chat messages
-                    messages = database.get_chat_messages(chat.id)
+            with st.expander("Browse Chats", expanded=True):
+                chat_options = { (c.title if c.title != "New Conversation" else f"Chat {c.id}") : c.id for c in user_chats }
+                selected_title = st.selectbox("Select a chat", list(chat_options.keys()), key="select_chat", index=0)
+                if st.button("Open Selected Chat", use_container_width=True):
+                    st.session_state.current_chat_id = chat_options[selected_title]
+                    messages = database.get_chat_messages(st.session_state.current_chat_id)
                     st.session_state.chat_history = []
+                    pending_user = None
                     for msg in messages:
                         if msg.role == 'user':
-                            # Load user question and assistant response together
-                            pass
-                        else:
+                            pending_user = msg
+                            continue
+                        if msg.role == 'assistant':
+                            question_text = pending_user.content if pending_user else ""
                             st.session_state.chat_history.append({
                                 'timestamp': msg.created_at.strftime("%Y-%m-%d %H:%M:%S"),
-                                'question': messages[messages.index(msg)-1].content if messages.index(msg) > 0 else "",
+                                'question': question_text,
                                 'answer': msg.content,
                                 'rows': msg.rows_returned,
                                 'success': msg.success == 1
                             })
+                            pending_user = None
+                    if pending_user is not None:
+                        st.session_state.chat_history.append({
+                            'timestamp': pending_user.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                            'question': pending_user.content,
+                            'answer': "",
+                            'rows': 0,
+                            'success': True
+                        })
+                    st.session_state.open_chat_now = True
+                    st.rerun()
+            # Quick buttons (last 10)
+            for chat in user_chats[:10]:
+                chat_title = chat.title if chat.title != "New Conversation" else f"Chat {chat.id}"
+                is_current = chat.id == st.session_state.current_chat_id
+                button_label = f"{'▶ ' if is_current else ''}{chat_title[:30]}"
+                if st.button(button_label, key=f"chat_btn_{chat.id}", use_container_width=True):
+                    st.session_state.current_chat_id = chat.id
+                    messages = database.get_chat_messages(chat.id)
+                    st.session_state.chat_history = []
+                    pending_user = None
+                    for msg in messages:
+                        if msg.role == 'user':
+                            pending_user = msg
+                            continue
+                        if msg.role == 'assistant':
+                            question_text = pending_user.content if pending_user else ""
+                            st.session_state.chat_history.append({
+                                'timestamp': msg.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                                'question': question_text,
+                                'answer': msg.content,
+                                'rows': msg.rows_returned,
+                                'success': msg.success == 1
+                            })
+                            pending_user = None
+                    if pending_user is not None:
+                        st.session_state.chat_history.append({
+                            'timestamp': pending_user.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                            'question': pending_user.content,
+                            'answer': "",
+                            'rows': 0,
+                            'success': True
+                        })
+                    st.session_state.open_chat_now = True
                     st.rerun()
         else:
             st.info("No chats yet. Click 'New Chat' to start!")
@@ -1504,6 +1539,18 @@ def main():
             # Update session state
             st.session_state.db_path = db_path
             st.session_state.schema = extract_schema(db_path)
+
+            # Auto-create a chat on upload and open it
+            if st.session_state.user_id:
+                try:
+                    default_title = f"Upload: {tables_created[0]['name']}" if tables_created else "New Conversation"
+                    chat = database.create_chat(st.session_state.user_id, default_title)
+                    if chat:
+                        st.session_state.current_chat_id = chat.id
+                        st.session_state.chat_history = []
+                        st.session_state.open_chat_now = True
+                except Exception:
+                    pass
             
             # Add to upload history
             for table_info in tables_created:
@@ -1583,13 +1630,84 @@ def main():
 • Average revenue by month
 • Top 10 highest sales
         """)
-        return
+        # Do not return here; allow chat view to render even without a database
     
-    if st.session_state.schema:
-        st.success(f"🗄️ Database loaded with {len(st.session_state.schema)} table(s)")
-    else:
-        st.error("Database uploaded but schema could not be extracted")
+    if st.session_state.db_path is not None:
+        if st.session_state.schema:
+            st.success(f"🗄️ Database loaded with {len(st.session_state.schema)} table(s)")
+        else:
+            st.error("Database uploaded but schema could not be extracted")
     
+    # Auto-open chat view when triggered by sidebar actions or upload - render at top
+    if st.session_state.get('open_chat_now'):
+        with top_chat_placeholder.container():
+            st.subheader("💭 Chat History")
+            if not st.session_state.chat_history:
+                st.info("No messages in this chat yet. Ask a question to start.")
+            else:
+                for idx, chat in enumerate(reversed(st.session_state.chat_history)):
+                    with st.container():
+                        st.markdown(f"**🕐 {chat['timestamp']}**")
+                        st.markdown(f"**👤 You:** {chat['question']}")
+                        if chat.get('answer'):
+                            st.markdown(f"**🤖 AskDB:** {chat['answer']}")
+                        if chat.get('rows'):
+                            st.caption(f"✅ Found {chat['rows']} rows")
+                        if chat.get('result_preview'):
+                            with st.expander("View result preview"):
+                                preview_df = pd.DataFrame(chat['result_preview'])
+                                st.dataframe(preview_df, use_container_width=True)
+                        st.divider()
+                # Continue this chat input
+                st.markdown("**Continue this chat**")
+                follow_up = st.text_input("Ask a follow-up question:", key="follow_up_top")
+                send_follow_up = st.button("Send to this chat", key="send_follow_up_top")
+                if send_follow_up and follow_up:
+                    with st.spinner("🤖 Loading AI model..."):
+                        nl2sql_tokenizer, nl2sql_model = get_nl2sql()
+                    schema_str = format_schema_for_model(st.session_state.schema) if st.session_state.schema else ""
+                    history_turns = []
+                    for turn in st.session_state.chat_history[-5:]:
+                        history_turns.append({'question': turn.get('question',''), 'answer': turn.get('answer','')})
+                    with st.spinner("🧠 Generating SQL query..."):
+                        try:
+                            sql = core_generate_sql(follow_up, schema_str, nl2sql_tokenizer, nl2sql_model, st.session_state.db_path, history=history_turns)
+                        except Exception as e:
+                            st.error(f"Generation error: {e}")
+                            sql = None
+                with st.spinner("⚙️ Executing query..."):
+                    df, error = execute_sql(sql, st.session_state.db_path) if sql else (None, "SQL not generated")
+                    import datetime
+                    if error:
+                        st.error(error)
+                        if st.session_state.current_chat_id:
+                            database.add_message(st.session_state.current_chat_id, "user", follow_up)
+                            database.add_message(st.session_state.current_chat_id, "assistant", f"Error: {error}", sql_query=sql, rows_returned=0, success=False)
+                        st.session_state.chat_history.append({
+                            'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            'question': follow_up,
+                            'answer': f"Error: {error}",
+                            'rows': 0,
+                            'success': False
+                        })
+                    else:
+                        st.success(f"✅ Query executed successfully! Found {len(df)} rows.")
+                        explanation = explain_sql_query(sql, follow_up, st.session_state.schema) if st.session_state.schema else "Query executed"
+                        st.info(explanation)
+                        st.dataframe(df, use_container_width=True)
+                        if st.session_state.current_chat_id:
+                            database.add_message(st.session_state.current_chat_id, "user", follow_up)
+                            database.add_message(st.session_state.current_chat_id, "assistant", explanation if not df.empty else "Query executed successfully", sql_query=sql, rows_returned=len(df), success=True)
+                        st.session_state.chat_history.append({
+                            'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            'question': follow_up,
+                            'answer': explanation if not df.empty else "Query executed successfully",
+                            'rows': len(df),
+                            'success': True,
+                            'result_preview': df.head(3).to_dict('records') if not df.empty else []
+                        })
+        st.session_state.open_chat_now = False
+
     tab1, tab2, tab3 = st.tabs(["💬 Ask a Question", "💭 Chat History", "📜 Query History"])
     
     with tab1:
@@ -1604,19 +1722,27 @@ def main():
         col1, col2 = st.columns([1, 4])
         with col1:
             generate_button = st.button("🚀 Generate & Run SQL", type="primary", use_container_width=True)
+        continue_toggle = st.checkbox("Continue current chat context", value=bool(st.session_state.get('continue_chat_mode')), help="Use last chat turns for context")
         
         if generate_button and question:
             with st.spinner("🤖 Loading AI model..."):
                 nl2sql_tokenizer, nl2sql_model = get_nl2sql()
             
-            schema_str = format_schema_for_model(st.session_state.schema)
+            schema_str = format_schema_for_model(st.session_state.schema) if st.session_state.schema else ""
+            history_turns = []
+            if continue_toggle and st.session_state.chat_history:
+                for turn in st.session_state.chat_history[-5:]:
+                    history_turns.append({'question': turn.get('question',''), 'answer': turn.get('answer','')})
             
             with st.spinner("🧠 Generating SQL query..."):
-                # Pass db_path for enhanced schema with sample values
-                sql = generate_sql(question, schema_str, nl2sql_tokenizer, nl2sql_model, st.session_state.db_path)
+                try:
+                    sql = core_generate_sql(question, schema_str, nl2sql_tokenizer, nl2sql_model, st.session_state.db_path, history=history_turns)
+                except Exception as e:
+                    st.error(f"Generation error: {e}")
+                    sql = None
             
             with st.spinner("⚙️ Executing query..."):
-                df, error = execute_sql(sql, st.session_state.db_path)
+                df, error = execute_sql(sql, st.session_state.db_path) if sql else (None, "SQL not generated")
             
             if error:
                 st.error(error)
@@ -1692,12 +1818,7 @@ def main():
                     
                     with st.spinner("📝 Generating natural language summary..."):
                         summary_tokenizer, summary_model = get_summarizer()
-                        if summary_tokenizer is not None and summary_model is not None:
-                            summary = generate_summary(df, question, summary_tokenizer, summary_model)
-                            st.subheader("🗒️ Summary")
-                            st.write(summary)
-                        else:
-                            st.info("Summary unavailable: model not loaded. Results are shown above.")
+                        summary = generate_summary(df, question, summary_tokenizer, summary_model)
                     
                     st.subheader("💡 Summary")
                     st.info(summary)
@@ -1743,7 +1864,10 @@ def main():
         st.subheader("💭 Chat History")
         
         if not st.session_state.chat_history:
-            st.info("No conversations yet. Ask a question to start chatting!")
+            if st.session_state.current_chat_id:
+                st.info("No messages in this chat yet. Ask a question to start.")
+            else:
+                st.info("No conversations yet. Ask a question to start chatting!")
         else:
             for idx, chat in enumerate(reversed(st.session_state.chat_history)):
                 with st.container():

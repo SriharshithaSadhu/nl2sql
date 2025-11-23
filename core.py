@@ -87,16 +87,17 @@ def detect_foreign_keys(db_path: str) -> Dict[str, List[Dict]]:
 
 
 def _fuzzy_match(query_word: str, target: str, threshold: float = 0.6) -> bool:
-    """Fuzzy string matching for abbreviations and partial matches"""
     query_word = query_word.lower().strip()
     target = target.lower().strip()
+    qw_ns = ''.join(query_word.split())
+    tg_ns = ''.join(target.split())
     
-    # Exact match
     if query_word == target:
         return True
     
-    # Substring match
     if query_word in target or target in query_word:
+        return True
+    if qw_ns and tg_ns and (qw_ns == tg_ns or qw_ns in tg_ns or tg_ns in qw_ns):
         return True
     
     # Abbreviation match (e.g., "math" matches "mathematics")
@@ -434,7 +435,9 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
                 for col_name, col_info in enhanced_schema[table_name].get('columns', {}).items():
                     samples = col_info.get('samples', [])
                     for sample in samples:
-                        value_to_column[sample.lower()] = (col_name, sample)
+                        s_low = str(sample).lower()
+                        value_to_column[s_low] = (col_name, sample)
+                        value_to_column[''.join(s_low.split())] = (col_name, sample)
         except Exception:
             pass
 
@@ -471,9 +474,12 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
                 quoted_avg = quote_identifier(avg_col)
                 quoted_group = quote_identifier(group_col)
                 base_sql = f"SELECT {quoted_group}, AVG({quoted_avg}) as average_{avg_col} FROM {quoted_table} GROUP BY {quoted_group}"
-                
-                # Add HAVING clause if comparison is mentioned
+
+                # Initialize optional clauses
                 having_sql = ""
+                order_sql = ""
+
+                # Add HAVING clause if comparison is mentioned
                 if any(word in q_lower for word in ['having', 'greater than', 'more than', 'above', 'less than', 'below']):
                     number_match = re.search(r'(\d+(?:\.\d+)?)', q_lower)
                     if number_match:
@@ -482,24 +488,23 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
                             having_sql = f" HAVING AVG({quoted_avg}) > {value}"
                         elif any(word in q_lower for word in ['less than', 'below', '<']):
                             having_sql = f" HAVING AVG({quoted_avg}) < {value}"
-                
-                    # Add ORDER BY (support multiple columns)
-                    order_sql = ""
-                    if any(word in q_lower for word in ['order', 'sort', 'highest', 'lowest']):
-                        order_dir = 'DESC' if any(word in q_lower for word in ['desc', 'highest', 'descending']) else 'ASC'
-                        # Support multiple ORDER BY columns
-                        order_cols = []
-                        # First column: the aggregated value
-                        order_cols.append(f"average_{avg_col}")
-                        # Check for secondary sort columns
-                        for col in columns:
-                            if col != avg_col and col != group_col:
-                                col_lower = col.lower()
-                                if col_lower in q_lower and any(word in q_lower for word in ['then', 'and', 'also']):
-                                    order_cols.append(quote_identifier(col))
-                        if order_cols:
-                            order_sql = f" ORDER BY {', '.join(order_cols)} {order_dir}"
-                
+
+                # Add ORDER BY (support multiple columns)
+                if any(word in q_lower for word in ['order', 'sort', 'highest', 'lowest']):
+                    order_dir = 'DESC' if any(word in q_lower for word in ['desc', 'highest', 'descending']) else 'ASC'
+                    # Support multiple ORDER BY columns
+                    order_cols = []
+                    # First column: the aggregated value
+                    order_cols.append(f"average_{avg_col}")
+                    # Check for secondary sort columns
+                    for c in columns:
+                        if c != avg_col and c != group_col:
+                            col_lower = c.lower()
+                            if col_lower in q_lower and any(word in q_lower for word in ['then', 'and', 'also']):
+                                order_cols.append(quote_identifier(c))
+                    if order_cols:
+                        order_sql = f" ORDER BY {', '.join(order_cols)} {order_dir}"
+
                 return f"{base_sql}{having_sql}{order_sql}"
         for col in columns:
             if col in q_lower:
@@ -511,7 +516,8 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
         if 'by' in q_lower or 'group' in q_lower:
             for col in columns:
                 if col.lower() in q_lower:
-                    quoted_col = quote_identifier(col)
+                    group_col_name = col
+                    quoted_col = quote_identifier(group_col_name)
                     base_sql = f"SELECT {quoted_col}, COUNT(*) as count FROM {quoted_table} GROUP BY {quoted_col}"
                     
                     # Add HAVING clause (enhanced with multiple conditions)
@@ -541,11 +547,11 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
                         # Support multiple ORDER BY columns
                         order_cols = ['count']
                         # Check for secondary sort columns
-                        for col in columns:
-                            if col != group_col:
-                                col_lower = col.lower()
+                        for c in columns:
+                            if c != group_col_name:
+                                col_lower = c.lower()
                                 if col_lower in q_lower and any(word in q_lower for word in ['then', 'and', 'also']):
-                                    order_cols.append(quote_identifier(col))
+                                    order_cols.append(quote_identifier(c))
                         if order_cols:
                             order_sql = f" ORDER BY {', '.join(order_cols)} {order_dir}"
                     
@@ -553,7 +559,9 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
         return f"SELECT COUNT(*) as total FROM {quoted_table}"
 
     sum_keywords = ['total', 'revenue', 'sum', 'combined']
-    if any(keyword in q_lower for keyword in sum_keywords) and not any(word in q_lower for word in ['where', 'above', 'below', 'count', 'average']):
+    comparison_words = ['greater than', 'more than', 'above', '>', 'greater', 'less than', 'below', 'under', '<', 'lesser', 'equals', 'equal', '=']
+    name_words = ['names', 'name', 'customer name', 'customer names']
+    if any(keyword in q_lower for keyword in sum_keywords) and not any(word in q_lower for word in ['where', 'count', 'average']) and not any(w in q_lower for w in comparison_words) and not any(w in q_lower for w in name_words):
         sum_col = None
         for col in columns:
             col_lower = col.lower()
@@ -588,7 +596,7 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
             
             # Find the right column - prioritize numeric columns that appear in question
             target_col = None
-            numeric_keywords = ['salary', 'price', 'amount', 'score', 'revenue', 'cost', 'total', 'value', 'age', 'quantity', 'balance']
+            numeric_keywords = ['salary', 'price', 'amount', 'score', 'revenue', 'cost', 'total', 'value', 'age', 'quantity', 'balance', 'purchases', 'total purchases']
             
             # First, look for numeric-sounding columns mentioned in question
             for col in columns:
@@ -624,6 +632,26 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
                 elif any(word in q_lower for word in ['equals', 'equal to', 'equal', '=']):
                     where_sql = f" WHERE {quoted_col} = {value}"
                 
+                # Determine SELECT columns (respect explicit column mentions like 'names')
+                select_sql = "SELECT *"
+                name_cols = [c for c in columns if 'name' in c.lower()]
+                wants_names = any(w in q_lower for w in ['names', 'name', 'customer name', 'customer names'])
+                if wants_names and name_cols:
+                    # Prefer composite names if available
+                    first_last = []
+                    for c in columns:
+                        cl = c.lower()
+                        if cl in ['first_name', 'firstname']:
+                            first_last.append(c)
+                        if cl in ['last_name', 'lastname']:
+                            first_last.append(c)
+                    if len(first_last) >= 2:
+                        select_cols = ", ".join([quote_identifier(c) for c in first_last[:2]])
+                        select_sql = f"SELECT {select_cols}"
+                    else:
+                        select_cols = ", ".join([quote_identifier(c) for c in name_cols])
+                        select_sql = f"SELECT {select_cols}"
+                
                 # Add ORDER BY if present
                 order_sql = ""
                 if any(word in q_lower for word in ['order by', 'sort by', 'sorted', 'highest', 'lowest', 'top']):
@@ -642,7 +670,7 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
                 if limit_match:
                     limit_sql = f" LIMIT {limit_match.group(1)}"
                 
-                return f"SELECT * FROM {quoted_table}{where_sql}{order_sql}{limit_sql}"
+                return f"{select_sql} FROM {quoted_table}{where_sql}{order_sql}{limit_sql}"
 
     # Natural date phrases on date-like columns
     date_like_cols = [c for c in columns if c.lower() in ['date', 'created_at', 'updated_at', 'timestamp', 'time', 'order_date', 'sale_date'] or c.lower().endswith('_date')]
@@ -668,24 +696,41 @@ def get_template_sql(question: str, table_name: str, columns: List[str], db_path
                 word_clean = word.lower().strip('.,!?;:')
                 if len(word_clean) <= 2:
                     continue
-                
-                # Exact match
                 if word_clean in value_to_column:
                     col_name, original_value = value_to_column[word_clean]
                     quoted_col = quote_identifier(col_name)
                     return f"SELECT * FROM {quoted_table} WHERE {quoted_col} = '{original_value}'"
-                
-                # Fuzzy match on values
                 for sample_val_lower, (col_name, original_value) in value_to_column.items():
                     if word_clean not in ['show', 'list', 'display', 'all', 'the', 'students', 'records', 'employees', 'customers']:
-                        # Try fuzzy matching
                         if _fuzzy_match(word_clean, sample_val_lower):
                             quoted_col = quote_identifier(col_name)
                             return f"SELECT * FROM {quoted_table} WHERE {quoted_col} LIKE '%{original_value}%'"
-                        # Original substring matching
-                        if (word_clean in sample_val_lower or sample_val_lower in word_clean):
-                            quoted_col = quote_identifier(col_name)
-                            return f"SELECT * FROM {quoted_table} WHERE {quoted_col} LIKE '%{original_value}%'"
+        connectors = [' of ', ' in ', ' from ', ' named ', ' called ', ' with ']
+        phrase_value = None
+        for conn in connectors:
+            if conn in q_lower:
+                after = q_lower.split(conn, 1)[1].strip()
+                phrase_value = after.split(' ')[0] if len(after.split(' ')) == 1 else after
+                break
+        if phrase_value:
+            pv_clean = phrase_value.strip('"\' .,!?;:')
+            pv_ns = ''.join(pv_clean.split())
+            if pv_clean in value_to_column or pv_ns in value_to_column:
+                col_name, original_value = value_to_column.get(pv_clean) or value_to_column.get(pv_ns)
+                quoted_col = quote_identifier(col_name)
+                return f"SELECT * FROM {quoted_table} WHERE {quoted_col} LIKE '%{original_value}%'"
+            if db_path:
+                try:
+                    enhanced_schema = extract_enhanced_schema(db_path)
+                    if table_name in enhanced_schema:
+                        pv_sql = phrase_value.replace("'", "''")
+                        for col_name, col_info in enhanced_schema[table_name].get('columns', {}).items():
+                            col_type = str(col_info.get('type', '')).lower()
+                            if col_type in ['text', 'varchar', 'char'] or 'name' in col_name.lower() or 'city' in col_name.lower() or 'state' in col_name.lower() or 'location' in col_name.lower():
+                                quoted_col = quote_identifier(col_name)
+                                return f"SELECT * FROM {quoted_table} WHERE {quoted_col} LIKE '%{pv_sql}%'"
+                except Exception:
+                    pass
         for col in columns:
             col_lower = col.lower()
             if col_lower in q_lower:
@@ -1040,13 +1085,11 @@ SQL:"""
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_length=150,
-            num_beams=5,
+            max_length=128,
+            num_beams=4,
             early_stopping=True,
-            temperature=0.2,
-            do_sample=True,
-            top_p=0.95,
-            repetition_penalty=1.2
+            do_sample=False,
+            repetition_penalty=1.1
         )
     sql = tokenizer.decode(outputs[0], skip_special_tokens=True)
     sql = repair_sql(sql, table_name, columns, all_columns, is_multi_table_query)
